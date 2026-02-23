@@ -1,11 +1,10 @@
-# Contributing to XHedge
+# Contributing to X-Aegis
 
 Thank you for your interest in building the future of inflation protection on Stellar! This guide will help you contribute effectively.
 
 ## 🛠 Tech Stack
 
-*   **Smart Contracts:** Soroban asset management logic (Rust)
-*   **Frontend:** Next.js, TypeScript, Tailwind CSS, Freighter Wallet
+*   **Smart Contracts:** Soroban, Rust
 *   **AI Engine:** Time-series FX forecasting (Python/FastAPI)
 *   **Data:** Central Bank APIs, Market Feeds
 
@@ -39,7 +38,7 @@ We follow a strict **Modular Commit** philosophy to ensure history is readable a
 1.  **Clone**: Clone the repo locally.
 2.  **Branch**: Create a feature branch (`feat/my-feature`).
 3.  **Develop**: Write code following the Style Guide (`STYLE.md`).
-4.  **Test**: Run `cargo test` (contracts) or `npm run test` (frontend).
+4.  **Test**: Run `cargo test` (contracts).
 5.  **Commit**: Follow the commit guidelines above.
 
 ## Getting Help

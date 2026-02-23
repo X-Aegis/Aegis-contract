@@ -2,7 +2,7 @@
 
 ## Our Pledge
 
-We pledge to make participation in the **XHedge** project a harassment-free experience for everyone, regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, or sexual identity and orientation.
+We pledge to make participation in the **X-Aegis** project a harassment-free experience for everyone, regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, or sexual identity and orientation.
 
 We are committed to building a **financial volatility shield** that respects the dignity of every user, especially those in emerging markets protecting their purchasing power.
 
