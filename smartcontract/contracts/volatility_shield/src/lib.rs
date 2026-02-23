@@ -136,6 +136,8 @@ impl VolatilityShield {
         }
 
         let assets_to_withdraw = Self::convert_to_assets(env.clone(), shares);
+        let (net_assets, fee) = Self::take_fees(&env, assets_to_withdraw);
+        
         let total_shares = Self::total_shares(&env);
         let total_assets = Self::total_assets(&env);
 
@@ -143,10 +145,21 @@ impl VolatilityShield {
         Self::set_total_assets(env.clone(), total_assets.checked_sub(assets_to_withdraw).unwrap());
         env.storage().persistent().set(&balance_key, &(current_balance.checked_sub(shares).unwrap()));
 
-        let token: Address = env.storage().instance().get(&DataKey::Token).expect("Token not initialized");
-        token::Client::new(&env, &token).transfer(&env.current_contract_address(), &from, &assets_to_withdraw);
+        let token_addr: Address = env.storage().instance().get(&DataKey::Token).expect("Token not initialized");
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract_addr = env.current_contract_address();
 
-        env.events().publish((symbol_short!("withdraw"), from.clone()), shares);
+        // 1. Transfer net assets to user
+        token_client.transfer(&contract_addr, &from, &net_assets);
+
+        // 2. Transfer fee to treasury if any
+        if fee > 0 {
+            let treasury_addr = Self::treasury(&env);
+            token_client.transfer(&contract_addr, &treasury_addr, &fee);
+            env.events().publish((symbol_short!("Fee"), symbol_short!("collect")), fee);
+        }
+
+        env.events().publish((symbol_short!("Withdraw"), from.clone()), shares);
     }
 
     // ── Rebalance ─────────────────────────────
@@ -257,11 +270,11 @@ impl VolatilityShield {
     }
 
     // ── Internal Helpers ──────────────────────
-    pub fn take_fees(env: &Env, amount: i128) -> i128 {
+    pub fn take_fees(env: &Env, amount: i128) -> (i128, i128) {
         let fee_pct = Self::fee_percentage(&env);
-        if fee_pct == 0 { return amount; }
+        if fee_pct == 0 { return (amount, 0); }
         let fee = amount.checked_mul(fee_pct as i128).unwrap().checked_div(10000).unwrap();
-        amount - fee
+        (amount - fee, fee)
     }
 
     pub fn convert_to_shares(env: Env, amount: i128) -> i128 {

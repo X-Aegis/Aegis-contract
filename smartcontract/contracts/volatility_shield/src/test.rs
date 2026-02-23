@@ -151,8 +151,9 @@ fn test_take_fees() {
     client.init(&admin, &asset, &oracle, &treasury, &500u32);
 
     let deposit_amount = 1000;
-    let remaining = client.take_fees(&deposit_amount);
+    let (remaining, fee) = client.take_fees(&deposit_amount);
     assert_eq!(remaining, 950);
+    assert_eq!(fee, 50);
 }
 
 #[test]
