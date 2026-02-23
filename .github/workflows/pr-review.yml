@@ -1,0 +1,60 @@
+name: Protocol Liaison (PR Reviewer)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  audit:
+    name: Institutional PR Audit
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Review Core Logic
+        id: build_review
+        continue-on-error: true
+        run: |
+          cd smartcontract
+          cargo test --all && cargo build --target wasm32-unknown-unknown --release
+
+      - name: ❌ Handle Review Failure
+        if: steps.build_review.outcome == 'failure'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "### ❌ Institutional Review Failed
+          
+          The Protocol Liaison has detected build or logic errors in this submission.
+          
+          **Required Action:**
+          1. Review the workflow logs to identify the failing tests or compilation errors.
+          2. Ensure the code aligns with our 'Must Do' standards (Traceability, Safety, Builds).
+          3. Push a fix to this branch to re-trigger the review.
+          
+          *This PR cannot be merged until the review passes.*"
+          exit 1
+
+      - name: ✅ Handle Review Success
+        if: steps.build_review.outcome == 'success'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "### ✅ Institutional Review Passed
+          
+          The Protocol Liaison has verified the logic and build integrity of this submission.
+          
+          **Status:** Perfect Alignment.
+          **Action:** Automatically merging into \`main\`...
+          
+          *Project maintained by @bbkenny.*"
+          
+          gh pr merge ${{ github.event.pull_request.number }} --merge --auto

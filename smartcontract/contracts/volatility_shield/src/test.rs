@@ -189,6 +189,45 @@ fn test_withdraw_success() {
 }
 
 #[test]
+fn test_withdraw_with_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
+    
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    
+    // 5% fee (500 basis points)
+    client.init(&admin, &token_id, &oracle, &treasury, &500u32);
+    
+    // Setup vault state
+    client.set_total_shares(&1000);
+    client.set_total_assets(&1000); // 1:1 ratio for simplicity
+    
+    let user = Address::generate(&env);
+    client.set_balance(&user, &100);
+    
+    // Mint assets to contract
+    stellar_asset_client.mint(&contract_id, &1000);
+    
+    // Withdraw 100 shares -> 100 assets
+    // 5% of 100 = 5 assets fee
+    // User gets 95 assets
+    client.withdraw(&user, &100);
+    
+    assert_eq!(client.balance(&user), 0);
+    assert_eq!(token_client.balance(&user), 95);
+    assert_eq!(token_client.balance(&treasury), 5);
+    assert_eq!(client.total_assets(), 900);
+}
+
+#[test]
 fn test_rebalance_admin_auth_accepted() {
     let env         = Env::default();
     env.mock_all_auths();
