@@ -1,6 +1,6 @@
-# XHedge 🛡️📉
+# X-Aegis 🛡️📉
 
-![XHedge Banner](https://placehold.co/1200x400/212121/ffffff/png?text=XHedge+Volatility+Shield)
+![X-Aegis Banner](https://placehold.co/1200x400/000000/ffffff/png?text=X-Aegis+Volatility+Shield)
 
 > **A Stablecoin Volatility Shield for Weak Currencies.**
 
@@ -11,7 +11,7 @@
 
 Even stablecoins expose users in emerging economies (like Nigeria) to FX timing risk, dollar volatility relative to local inflation, and entry/exit rate manipulation. **Stable ≠ Stable relative to local purchasing power.**
 
-**XHedge** acts as a "Micro hedge fund for everyday Africans."
+**X-Aegis** acts as a "Micro hedge fund for everyday Africans."
 
 -   **User Action:** Users deposit stablecoins.
 -   **AI Engine:** Predicts FX volatility and local inflation trends.
@@ -28,8 +28,8 @@ Even stablecoins expose users in emerging economies (like Nigeria) to FX timing 
 
 ```mermaid
 graph TD
-    User((User)) -->|Deposit USDC| UI[XHedge Dashboard]
-    UI -->|Invoke| Vault[Soroban Vault Contract]
+    External((External Signal)) -->|Trigger| Oracle[Rebalance Oracle]
+    Oracle -->|Invoke| Vault[Soroban Vault Contract]
     
     subgraph AI Engine
         Data[Central Bank/FX APIs] -->|Feed| Model[FX Forecast Model]
@@ -37,7 +37,6 @@ graph TD
     end
 
     subgraph On-Chain Strategy
-        Oracle -->|Trigger| Vault
         Vault -->|Alloc 40%| USDC[USDC Reserves]
         Vault -->|Alloc 30%| LP[Stellar LP Positions]
         Vault -->|Alloc 30%| Synth[Synthetic Hedges]
@@ -60,15 +59,6 @@ graph TD
 *   Inflation modeling
 *   Risk scoring engine
 
-**Data Sources:**
-*   Central bank APIs
-*   FX feeds
-*   Market price feeds
-
-**Frontend:**
-*   Portfolio dashboard
-*   Risk visualization UI
-
 ---
 
 ## 🚀 Getting Started
@@ -89,27 +79,17 @@ cargo build --all
 **Setup Smart Contracts:**
 ```bash
 cd smartcontract
-# See docs/ISSUES-SMARTCONTRACT.md for tasks
+# Smart contract setup instructions go here
 ```
 
-**Setup Frontend:**
-```bash
-cd frontend
-npm install
-# See docs/ISSUES-FRONTEND.md for tasks
-```
 
 ---
 
 ## 📚 Documentation & Trackers
 
-*   🧠 **[Smart Contract Issues](./docs/ISSUES-SMARTCONTRACT.md)**
-*   🎨 **[Frontend Issues](./docs/ISSUES-FRONTEND.md)**
-*   🤖 **[Backend & AI Issues](./docs/ISSUES-BACKEND-AI.md)**
 
 Guides:
 *   📘 **[Smart Contract Guide](./docs/SMARTCONTRACT_GUIDE.md)**
-*   🌐 **[Frontend Integration Guide](./docs/FRONTEND_GUIDE.md)**
 
 ---
 
