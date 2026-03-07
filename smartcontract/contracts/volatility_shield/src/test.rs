@@ -273,3 +273,72 @@ fn test_pause_circuit_breaker() {
     // This should panic because the contract is paused
     client.deposit(&user, &100);
 }
+
+
+// ── Rebalance Delta Calculation Tests ─────────────────
+
+#[test]
+fn test_calc_rebalance_delta_positive() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current is 100, Target is 150. Delta should be +50
+    let delta = client.calc_rebalance_delta(&100, &150);
+    assert_eq!(delta, 50);
+}
+
+#[test]
+fn test_calc_rebalance_delta_negative() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current is 200, Target is 50. Delta should be -150
+    let delta = client.calc_rebalance_delta(&200, &50);
+    assert_eq!(delta, -150);
+}
+
+#[test]
+fn test_calc_rebalance_delta_identical() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current matches Target. Delta should be 0.
+    let delta = client.calc_rebalance_delta(&100, &100);
+    assert_eq!(delta, 0);
+}
+
+#[test]
+fn test_calc_rebalance_delta_zero_current() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current is 0, Target is 100. Delta should be +100.
+    let delta = client.calc_rebalance_delta(&0, &100);
+    assert_eq!(delta, 100);
+}
+
+#[test]
+fn test_calc_rebalance_delta_zero_target() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current is 100, Target is 0. Delta should be -100.
+    let delta = client.calc_rebalance_delta(&100, &0);
+    assert_eq!(delta, -100);
+}
+
+#[test]
+#[should_panic(expected = "Balances cannot be negative")]
+fn test_calc_rebalance_delta_negative_inputs_panic() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Should panic on negative balances
+    client.calc_rebalance_delta(&-50, &100);
+}

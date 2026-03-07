@@ -223,19 +223,37 @@ impl VolatilityShield {
         for (strategy_addr, target_allocation) in allocations.iter() {
             let strategy = StrategyClient::new(&env, strategy_addr.clone());
             let current_balance = strategy.balance();
+            
+            // Use the new delta calculation logic
+            let delta = Self::calc_rebalance_delta(env.clone(), current_balance, target_allocation);
 
-            if target_allocation > current_balance {
-                let diff = target_allocation - current_balance;
-                token_client.transfer(&vault, &strategy_addr, &diff);
-                strategy.deposit(diff);
-            } else if target_allocation < current_balance {
-                let diff = current_balance - target_allocation;
-                strategy.withdraw(diff);
-                token_client.transfer(&strategy_addr, &vault, &diff);
+            if delta > 0 {
+                // Target is higher, we need to deposit the difference
+                token_client.transfer(&vault, &strategy_addr, &delta);
+                strategy.deposit(delta);
+            } else if delta < 0 {
+                // Target is lower, we need to withdraw the difference (abs value)
+                let amount_to_withdraw = delta.abs();
+                strategy.withdraw(amount_to_withdraw);
+                token_client.transfer(&strategy_addr, &vault, &amount_to_withdraw);
             }
+            // If delta == 0, do nothing
         }
     }
 
+    /// Calculate the exact delta needed to reach the target allocation.
+    /// Returns a positive number if funds need to be added (deposit).
+    /// Returns a negative number if funds need to be removed (withdraw).
+    /// Returns 0 if no change is needed.
+    pub fn calc_rebalance_delta(_env: Env, current: i128, target: i128) -> i128 {
+        if target < 0 || current < 0 {
+            panic!("Balances cannot be negative");
+        }
+        
+        target.checked_sub(current).expect("Delta calculation overflow")
+    }
+
+    
     // ── Strategy Management ───────────────────
     pub fn add_strategy(env: Env, strategy: Address) -> Result<(), Error> {
         let admin = Self::get_admin(&env);
