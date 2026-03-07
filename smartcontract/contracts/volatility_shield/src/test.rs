@@ -246,7 +246,7 @@ fn test_rebalance_admin_auth_accepted() {
     client.init(&admin, &asset, &oracle, &treasury, &0u32);
 
     let allocations: Map<Address, i128> = Map::new(&env);
-    client.rebalance(&allocations);
+    client.rebalance(&allocations, &0u32);
 }
 
 #[test]
@@ -773,4 +773,25 @@ fn test_get_timelock_proposal_timestamp_default() {
     client.init(&admin, &asset, &oracle, &treasury, &0u32);
 
     assert_eq!(client.get_timelock_proposal_timestamp(), 0u64);
+}
+
+// ── Slippage Protection Tests ─────────────────
+
+#[test]
+fn test_rebalance_with_zero_slippage_tolerance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let allocations: Map<Address, i128> = Map::new(&env);
+    client.rebalance(&allocations, &0u32);
 }

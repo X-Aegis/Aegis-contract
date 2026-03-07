@@ -21,6 +21,7 @@ pub enum Error {
     WithdrawCapExceeded = 8,
     TimelockNotElapsed = 9,
     TimelockNotSet = 10,
+    SlippageExceeded = 11,
 }
 
 // ─────────────────────────────────────────────
@@ -394,7 +395,8 @@ impl VolatilityShield {
 
     // ── Rebalance ─────────────────────────────
     /// Move funds between strategies according to `allocations`.
-    pub fn rebalance(env: Env, allocations: Map<Address, i128>) {
+    /// Accepts slippage tolerance in basis points (1 bps = 0.01%).
+    pub fn rebalance(env: Env, allocations: Map<Address, i128>, max_slippage_bps: u32) {
         let admin = Self::get_admin(&env);
         let oracle = Self::get_oracle(&env);
 
@@ -408,20 +410,60 @@ impl VolatilityShield {
             let strategy = StrategyClient::new(&env, strategy_addr.clone());
             let current_balance = strategy.balance();
 
-            // Use the new delta calculation logic
             let delta = Self::calc_rebalance_delta(env.clone(), current_balance, target_allocation);
+            let expected_balance = target_allocation;
 
             if delta > 0 {
-                // Target is higher, we need to deposit the difference
                 token_client.transfer(&vault, &strategy_addr, &delta);
                 strategy.deposit(delta);
             } else if delta < 0 {
-                // Target is lower, we need to withdraw the difference (abs value)
                 let amount_to_withdraw = delta.abs();
                 strategy.withdraw(amount_to_withdraw);
                 token_client.transfer(&strategy_addr, &vault, &amount_to_withdraw);
             }
-            // If delta == 0, do nothing
+
+            let actual_balance = strategy.balance();
+            if max_slippage_bps > 0 {
+                Self::check_slippage(
+                    &env,
+                    expected_balance,
+                    actual_balance,
+                    max_slippage_bps,
+                    strategy_addr.clone(),
+                );
+            }
+        }
+    }
+
+    fn check_slippage(
+        env: &Env,
+        expected: i128,
+        actual: i128,
+        max_slippage_bps: u32,
+        strategy_addr: Address,
+    ) {
+        if expected == 0 {
+            return;
+        }
+        let diff = (expected - actual).abs();
+        let slippage_bps: u32 = (diff
+            .checked_mul(10000)
+            .unwrap()
+            .checked_div(expected)
+            .unwrap()) as u32;
+
+        if slippage_bps > max_slippage_bps {
+            env.events().publish(
+                (symbol_short!("Slippage"), symbol_short!("exceeded")),
+                (
+                    strategy_addr,
+                    expected,
+                    actual,
+                    slippage_bps,
+                    max_slippage_bps,
+                ),
+            );
+            panic!("slippage exceeded");
         }
     }
 
