@@ -19,6 +19,8 @@ pub enum Error {
     DepositCapExceeded = 6,
     GlobalCapExceeded = 7,
     WithdrawCapExceeded = 8,
+    TimelockNotElapsed = 9,
+    TimelockNotSet = 10,
 }
 
 // ─────────────────────────────────────────────
@@ -42,6 +44,8 @@ pub enum DataKey {
     MaxTotalAssets,
     MaxWithdrawPerTx,
     UserDeposited(Address),
+    TimelockDuration,
+    TimelockProposal,
 }
 
 // ─────────────────────────────────────────────
@@ -121,6 +125,94 @@ impl VolatilityShield {
         let admin = Self::get_admin(&env);
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &state);
+    }
+
+    // ── Timelock Management ────────────────────
+    pub fn set_timelock_duration(env: Env, duration: u64) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::TimelockDuration, &duration);
+        env.events().publish(
+            (symbol_short!("Timelock"), symbol_short!("duration")),
+            duration,
+        );
+    }
+
+    pub fn get_timelock_duration(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TimelockDuration)
+            .unwrap_or(0)
+    }
+
+    pub fn propose_action(env: Env) -> u64 {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+
+        let duration = Self::get_timelock_duration(&env);
+        if duration == 0 {
+            panic!("timelock duration not set");
+        }
+
+        let timestamp = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey::TimelockProposal, &timestamp);
+
+        env.events().publish(
+            (symbol_short!("Timelock"), symbol_short!("started")),
+            timestamp,
+        );
+
+        timestamp
+    }
+
+    pub fn execute_action(env: Env) -> Result<u64, Error> {
+        let duration = Self::get_timelock_duration(&env);
+        if duration == 0 {
+            panic!("timelock not set");
+        }
+
+        let proposal_timestamp: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TimelockProposal)
+            .unwrap_or(0);
+
+        if proposal_timestamp == 0 {
+            panic!("timelock not set");
+        }
+
+        let current_timestamp = env.ledger().timestamp();
+        let elapsed = current_timestamp - proposal_timestamp;
+
+        if elapsed < duration {
+            env.events().publish(
+                (symbol_short!("Timelock"), symbol_short!("rejected")),
+                (proposal_timestamp, current_timestamp, elapsed, duration),
+            );
+            panic!("timelock not elapsed");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::TimelockProposal, &0u64);
+
+        env.events().publish(
+            (symbol_short!("Timelock"), symbol_short!("executed")),
+            current_timestamp,
+        );
+
+        Ok(current_timestamp)
+    }
+
+    pub fn get_timelock_proposal_timestamp(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TimelockProposal)
+            .unwrap_or(0)
     }
 
     // ── Cap Management (Admin) ────────────────
@@ -315,7 +407,7 @@ impl VolatilityShield {
         for (strategy_addr, target_allocation) in allocations.iter() {
             let strategy = StrategyClient::new(&env, strategy_addr.clone());
             let current_balance = strategy.balance();
-            
+
             // Use the new delta calculation logic
             let delta = Self::calc_rebalance_delta(env.clone(), current_balance, target_allocation);
 
@@ -341,11 +433,12 @@ impl VolatilityShield {
         if target < 0 || current < 0 {
             panic!("Balances cannot be negative");
         }
-        
-        target.checked_sub(current).expect("Delta calculation overflow")
+
+        target
+            .checked_sub(current)
+            .expect("Delta calculation overflow")
     }
 
-    
     // ── Strategy Management ───────────────────
     pub fn add_strategy(env: Env, strategy: Address) -> Result<(), Error> {
         let admin = Self::get_admin(&env);

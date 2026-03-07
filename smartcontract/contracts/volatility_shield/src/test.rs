@@ -2,7 +2,7 @@
 use super::*;
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient;
-use soroban_sdk::{testutils::Address as _, Address, Env, Map};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address, Env, Map};
 
 fn create_token_contract<'a>(
     env: &Env,
@@ -274,7 +274,6 @@ fn test_pause_circuit_breaker() {
     client.deposit(&user, &100);
 }
 
-
 // ── Rebalance Delta Calculation Tests ─────────────────
 
 #[test]
@@ -342,7 +341,6 @@ fn test_calc_rebalance_delta_negative_inputs_panic() {
     // Should panic on negative balances
     client.calc_rebalance_delta(&-50, &100);
 }
-
 
 // ── Deposit & Withdrawal Cap Tests ─────────────────────
 
@@ -608,4 +606,171 @@ fn test_multiple_deposits_track_cumulative() {
     // Total deposited = 450, next 60 would exceed 500 cap
     // Verify the balance is tracked correctly
     assert_eq!(client.total_assets(), 450);
+}
+
+// ── Timelock Tests ───────────────────────────
+
+#[test]
+fn test_set_timelock_duration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    client.set_timelock_duration(&86400u64);
+    assert_eq!(client.get_timelock_duration(), 86400u64);
+}
+
+#[test]
+fn test_propose_action_stores_timestamp() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_timelock_duration(&100u64);
+
+    let timestamp = client.propose_action();
+    assert_eq!(timestamp, 1000);
+    assert_eq!(client.get_timelock_proposal_timestamp(), timestamp);
+}
+
+#[test]
+#[should_panic(expected = "timelock duration not set")]
+fn test_propose_action_without_duration_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    client.propose_action();
+}
+
+#[test]
+#[should_panic(expected = "timelock not elapsed")]
+fn test_execute_action_before_timelock_expires_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_timelock_duration(&86400u64);
+
+    client.propose_action();
+
+    client.execute_action();
+}
+
+#[test]
+fn test_execute_action_after_timelock_expires() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_timelock_duration(&100u64);
+
+    let timestamp = client.propose_action();
+    assert_eq!(timestamp, 1000);
+
+    env.ledger().set_timestamp(timestamp + 101);
+
+    let execution_timestamp = client.execute_action();
+    assert!(execution_timestamp > timestamp);
+}
+
+#[test]
+#[should_panic(expected = "timelock not set")]
+fn test_execute_action_without_proposal_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_timelock_duration(&100u64);
+
+    client.execute_action();
+}
+
+#[test]
+fn test_timelock_default_duration_is_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    assert_eq!(client.get_timelock_duration(), 0u64);
+}
+
+#[test]
+fn test_get_timelock_proposal_timestamp_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    assert_eq!(client.get_timelock_proposal_timestamp(), 0u64);
 }
