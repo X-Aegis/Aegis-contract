@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env, Map,
-    Vec,
+    TryFromVal, Vec,
 };
 
 // ─────────────────────────────────────────────
@@ -41,12 +41,37 @@ pub enum DataKey {
     Token,
     Balance(Address),
     Paused,
+    Guardians,
+    Requirement,
+    Proposal(u64),
+    Signatures(u64),
+    NextProposalId,
     MaxDepositPerUser,
     MaxTotalAssets,
     MaxWithdrawPerTx,
     UserDeposited(Address),
     TimelockDuration,
     TimelockProposal,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActionType {
+    SetPaused = 1,
+    AddStrategy = 2,
+    Rebalance = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    pub id: u64,
+    pub action_type: ActionType,
+    pub description: soroban_sdk::String,
+    pub creator: Address,
+    pub expiration: u64,
+    pub executed: bool,
+    pub data: Vec<soroban_sdk::Val>, // Packed parameters for the action
 }
 
 // ─────────────────────────────────────────────
@@ -121,10 +146,159 @@ impl VolatilityShield {
         env.storage().instance().set(&DataKey::Token, &asset);
     }
 
+    /// Set up multisig guardians and threshold.
+    pub fn init_multisig(env: Env, guardians: Vec<Address>, requirement: u32) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+
+        if guardians.len() < requirement as u32 {
+            panic!("Guardians count must be >= requirement");
+        }
+
+        env.storage().instance().set(&DataKey::Guardians, &guardians);
+        env.storage()
+            .instance()
+            .set(&DataKey::Requirement, &requirement);
+    }
+
+    pub fn propose_multisig_action(
+        env: Env,
+        creator: Address,
+        action_type: ActionType,
+        description: soroban_sdk::String,
+        data: Vec<soroban_sdk::Val>,
+    ) -> u64 {
+        creator.require_auth();
+
+        // Check if creator is a guardian
+        let guardians = Self::get_guardians(&env);
+        if !guardians.contains(creator.clone()) {
+            panic!("Only guardians can propose actions");
+        }
+
+        let id = Self::get_next_proposal_id(&env);
+        let proposal = Proposal {
+            id,
+            action_type,
+            description,
+            creator: creator.clone(),
+            expiration: env.ledger().timestamp() + 60 * 60 * 24 * 7, // 7 days
+            executed: false,
+            data,
+        };
+
+        env.storage().persistent().set(&DataKey::Proposal(id), &proposal);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextProposalId, &(id + 1));
+
+        env.events()
+            .publish((symbol_short!("Proposal"), creator, id), id);
+
+        id
+    }
+
+    pub fn approve_multisig_action(env: Env, guardian: Address, proposal_id: u64) {
+        guardian.require_auth();
+
+        let guardians = Self::get_guardians(&env);
+        if !guardians.contains(guardian.clone()) {
+            panic!("Only guardians can approve");
+        }
+
+        let mut proposal = Self::get_proposal(&env, proposal_id);
+        if proposal.executed {
+            panic!("Proposal already executed");
+        }
+        if env.ledger().timestamp() > proposal.expiration {
+            panic!("Proposal expired");
+        }
+
+        let mut signatures: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Signatures(proposal_id))
+            .unwrap_or(Vec::new(&env));
+
+        if signatures.contains(guardian.clone()) {
+            panic!("Guardian already signed");
+        }
+
+        signatures.push_back(guardian.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Signatures(proposal_id), &signatures);
+
+        let requirement = Self::get_requirement(&env);
+        if signatures.len() >= requirement {
+            Self::execute_multisig_proposal(&env, &mut proposal);
+        }
+
+        env.events()
+            .publish((symbol_short!("Approve"), guardian, proposal_id), proposal_id);
+    }
+
+    fn execute_multisig_proposal(env: &Env, proposal: &mut Proposal) {
+        match proposal.action_type {
+            ActionType::SetPaused => {
+                let state: bool = bool::try_from_val(env, &proposal.data.get(0).unwrap()).unwrap();
+                env.storage().instance().set(&DataKey::Paused, &state);
+            }
+            ActionType::AddStrategy => {
+                let strategy: Address = Address::try_from_val(env, &proposal.data.get(0).unwrap()).unwrap();
+                let mut strategies = Self::get_strategies(env);
+                if !strategies.contains(strategy.clone()) {
+                    strategies.push_back(strategy.clone());
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::Strategies, &strategies);
+                }
+            }
+            ActionType::Rebalance => {
+                let allocations: Map<Address, i128> = Map::try_from_val(env, &proposal.data.get(0).unwrap()).unwrap();
+                // Internal rebalance logic (calling from rebalance helper)
+                Self::rebalance_internal(env.clone(), allocations);
+            }
+        }
+        proposal.executed = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal.id), proposal);
+        
+        env.events().publish((symbol_short!("Execute"), proposal.id), proposal.id);
+    }
+
+    fn rebalance_internal(env: Env, allocations: Map<Address, i128>) {
+        let asset_addr = Self::get_asset(&env);
+        let token_client = token::Client::new(&env, &asset_addr);
+        let vault = env.current_contract_address();
+
+        for (strategy_addr, target_allocation) in allocations.iter() {
+            let strategy = StrategyClient::new(&env, strategy_addr.clone());
+            let current_balance = strategy.balance();
+
+            if target_allocation > current_balance {
+                let diff = target_allocation - current_balance;
+                token_client.transfer(&vault, &strategy_addr, &diff);
+                strategy.deposit(diff);
+            } else if target_allocation < current_balance {
+                let diff = current_balance - target_allocation;
+                strategy.withdraw(diff);
+                token_client.transfer(&strategy_addr, &vault, &diff);
+            }
+        }
+    }
+
     // ── Admin Circuit Breaker ─────────────────
     pub fn set_paused(env: Env, state: bool) {
         let admin = Self::get_admin(&env);
         admin.require_auth();
+
+        let requirement = Self::get_requirement(&env);
+        if requirement > 0 {
+            panic!("set_paused must go through multisig proposal");
+        }
+
         env.storage().instance().set(&DataKey::Paused, &state);
     }
 
@@ -402,6 +576,11 @@ impl VolatilityShield {
 
         Self::require_admin_or_oracle(&env, &admin, &oracle);
 
+        let requirement = Self::get_requirement(&env);
+        if requirement > 0 {
+            panic!("rebalance must go through multisig proposal");
+        }
+
         let asset_addr = Self::get_asset(&env);
         let token_client = token::Client::new(&env, &asset_addr);
         let vault = env.current_contract_address();
@@ -433,6 +612,8 @@ impl VolatilityShield {
                 );
             }
         }
+
+        Self::rebalance_internal(env, allocations);
     }
 
     fn check_slippage(
@@ -485,6 +666,11 @@ impl VolatilityShield {
     pub fn add_strategy(env: Env, strategy: Address) -> Result<(), Error> {
         let admin = Self::get_admin(&env);
         admin.require_auth();
+
+        let requirement = Self::get_requirement(&env);
+        if requirement > 0 {
+            panic!("add_strategy must go through multisig proposal");
+        }
 
         let mut strategies: Vec<Address> = env
             .storage()
@@ -597,6 +783,34 @@ impl VolatilityShield {
         env.storage()
             .persistent()
             .get(&DataKey::Balance(user))
+            .unwrap_or(0)
+    }
+
+    pub fn get_guardians(env: &Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(env))
+    }
+
+    pub fn get_requirement(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Requirement)
+            .unwrap_or(0)
+    }
+
+    pub fn get_proposal(env: &Env, id: u64) -> Proposal {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Proposal(id))
+            .expect("Proposal not found")
+    }
+
+    pub fn get_next_proposal_id(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
             .unwrap_or(0)
     }
 

@@ -13,13 +13,10 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "rebalance",
+              "function_name": "set_timelock_duration",
               "args": [
                 {
-                  "map": []
-                },
-                {
-                  "u32": 0
+                  "u64": 86400
                 }
               ]
             }
@@ -27,7 +24,8 @@
           "sub_invocations": []
         }
       ]
-    ]
+    ],
+    []
   ],
   "ledger": {
     "protocol_version": 22,
@@ -120,6 +118,18 @@
                         },
                         "val": {
                           "vec": []
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "TimelockDuration"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 86400
                         }
                       },
                       {
