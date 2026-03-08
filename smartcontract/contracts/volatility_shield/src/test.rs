@@ -15,7 +15,30 @@ fn create_token_contract<'a>(
 }
 
 #[test]
-fn test_init_stores_roles() {
+fn test_init_comprehensive() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fee_percentage = 250u32; // 2.5%
+
+    client.init(&admin, &asset, &oracle, &treasury, &fee_percentage);
+
+    assert_eq!(client.get_admin(), admin);
+    assert_eq!(client.get_asset(), asset);
+    assert_eq!(client.get_oracle(), oracle);
+    assert_eq!(client.treasury(), treasury);
+    assert_eq!(client.fee_percentage(), fee_percentage);
+    assert_eq!(client.get_strategies().len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Already initialized")]
+fn test_init_already_initialized() {
     let env = Env::default();
     let contract_id = env.register_contract(None, VolatilityShield);
     let client = VolatilityShieldClient::new(&env, &contract_id);
@@ -25,13 +48,9 @@ fn test_init_stores_roles() {
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    client.init(&admin, &asset, &oracle, &treasury, &500u32);
-
-    assert_eq!(client.get_admin(), admin);
-    assert_eq!(client.get_oracle(), oracle);
-    assert_eq!(client.get_asset(), asset);
-    assert_eq!(client.treasury(), treasury);
-    assert_eq!(client.fee_percentage(), 500u32);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    // Should panic
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
 }
 
 #[test]
@@ -192,7 +211,7 @@ fn test_withdraw_success() {
 }
 
 #[test]
-fn test_withdraw_with_fee() {
+fn test_withdraw_flow_complete() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -205,29 +224,57 @@ fn test_withdraw_with_fee() {
     let admin = Address::generate(&env);
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
+    let fee_bps = 1000u32; // 10% fee for easier math
 
-    // 5% fee (500 basis points)
-    client.init(&admin, &token_id, &oracle, &treasury, &500u32);
-
-    // Setup vault state
-    client.set_total_shares(&1000);
-    client.set_total_assets(&1000); // 1:1 ratio for simplicity
+    client.init(&admin, &token_id, &oracle, &treasury, &fee_bps);
 
     let user = Address::generate(&env);
-    client.set_balance(&user, &100);
+    let deposit_amount = 1000i128;
 
-    // Mint assets to contract
-    stellar_asset_client.mint(&contract_id, &1000);
+    // 1. Setup: Deposit 1000 tokens
+    stellar_asset_client.mint(&user, &deposit_amount);
+    client.deposit(&user, &deposit_amount);
 
-    // Withdraw 100 shares -> 100 assets
-    // 5% of 100 = 5 assets fee
-    // User gets 95 assets
-    client.withdraw(&user, &100);
+    assert_eq!(client.balance(&user), 1000);
+    assert_eq!(client.total_shares(), 1000);
+    assert_eq!(client.total_assets(), 1000);
 
-    assert_eq!(client.balance(&user), 0);
-    assert_eq!(token_client.balance(&user), 95);
-    assert_eq!(token_client.balance(&treasury), 5);
-    assert_eq!(client.total_assets(), 900);
+    // 2. Perform Withdrawal of 500 shares
+    // At 1:1 ratio, 500 shares = 500 assets
+    // 10% fee of 500 = 50 assets
+    // Net to user = 450 assets
+    client.withdraw(&user, &500);
+
+    // 3. Verify balances after withdrawal
+    assert_eq!(client.balance(&user), 500);
+    assert_eq!(client.total_shares(), 500);
+    assert_eq!(client.total_assets(), 500); // total_assets is reduced by full assets_to_withdraw (500)
+    
+    assert_eq!(token_client.balance(&user), 450);
+    assert_eq!(token_client.balance(&treasury), 50);
+    assert_eq!(token_client.balance(&contract_id), 500);
+}
+
+#[test]
+#[should_panic(expected = "insufficient shares for withdrawal")]
+fn test_withdraw_insufficient_shares() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+    
+    client.withdraw(&user, &1);
+}
+
+#[test]
+#[should_panic(expected = "shares to withdraw must be positive")]
+fn test_withdraw_amount_zero() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+    client.withdraw(&user, &0);
 }
 
 #[test]
@@ -272,6 +319,55 @@ fn test_pause_circuit_breaker() {
 
     // This should panic because the contract is paused
     client.deposit(&user, &100);
+}
+
+#[test]
+fn test_deposit_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 1000i128;
+
+    // Mint tokens to user
+    stellar_asset_client.mint(&user, &deposit_amount);
+    assert_eq!(token_client.balance(&user), deposit_amount);
+
+    // Initial state check
+    assert_eq!(client.total_shares(), 0);
+    assert_eq!(client.total_assets(), 0);
+
+    // Perform deposit
+    client.deposit(&user, &deposit_amount);
+
+    // Verify balances after deposit
+    assert_eq!(token_client.balance(&user), 0);
+    assert_eq!(token_client.balance(&contract_id), deposit_amount);
+    assert_eq!(client.balance(&user), deposit_amount); // 1:1 since total_shares was 0
+    assert_eq!(client.total_shares(), deposit_amount);
+    assert_eq!(client.total_assets(), deposit_amount);
+}
+
+#[test]
+#[should_panic(expected = "deposit amount must be positive")]
+fn test_deposit_amount_zero() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+    client.deposit(&user, &0);
 }
 
 #[test]
