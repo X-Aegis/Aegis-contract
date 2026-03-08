@@ -273,3 +273,62 @@ fn test_pause_circuit_breaker() {
     // This should panic because the contract is paused
     client.deposit(&user, &100);
 }
+
+#[test]
+fn test_fuzz_math_symmetry() {
+    proptest::proptest!(
+        proptest::prelude::ProptestConfig::with_cases(100),
+        |(
+            amount in 1..1_000_000_000_000i128,
+            total_assets in 1..1_000_000_000_000i128,
+            total_shares in 1..1_000_000_000_000i128
+        )| {
+            let env = Env::default();
+            let contract_id = env.register_contract(None, VolatilityShield);
+            let client = VolatilityShieldClient::new(&env, &contract_id);
+            let admin = Address::generate(&env);
+            let asset = Address::generate(&env);
+            let oracle = Address::generate(&env);
+            let treasury = Address::generate(&env);
+            client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+            client.set_total_assets(&total_assets);
+            client.set_total_shares(&total_shares);
+
+            let shares = client.convert_to_shares(&amount);
+            let assets_back = client.convert_to_assets(&shares);
+
+            // Property: Assets back should be <= original amount (rounding favors the vault)
+            if assets_back > amount {
+                panic!("Rounding error: assets_back {} > amount {}", assets_back, amount);
+            }
+        }
+    );
+}
+
+#[test]
+fn test_fuzz_conversion_no_panic() {
+    proptest::proptest!(
+        proptest::prelude::ProptestConfig::with_cases(100),
+        |(
+            amount in 0..1_000_000_000_000_000_000_000_000i128, // 10^24
+            total_assets in 1..1_000_000_000_000_000_000_000_000i128,
+            total_shares in 1..1_000_000_000_000_000_000_000_000i128
+        )| {
+            let env = Env::default();
+            let contract_id = env.register_contract(None, VolatilityShield);
+            let client = VolatilityShieldClient::new(&env, &contract_id);
+            let admin = Address::generate(&env);
+            let asset = Address::generate(&env);
+            let oracle = Address::generate(&env);
+            let treasury = Address::generate(&env);
+            client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+            client.set_total_assets(&total_assets);
+            client.set_total_shares(&total_shares);
+
+            client.convert_to_shares(&amount);
+            client.convert_to_assets(&amount);
+        }
+    );
+}
