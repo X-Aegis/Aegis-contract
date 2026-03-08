@@ -2,7 +2,7 @@
 use super::*;
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient;
-use soroban_sdk::{testutils::Address as _, Address, Env, Map};
+use soroban_sdk::{testutils::Address as _, Address, Env, IntoVal, Map};
 
 fn create_token_contract<'a>(
     env: &Env,
@@ -272,4 +272,76 @@ fn test_pause_circuit_breaker() {
 
     // This should panic because the contract is paused
     client.deposit(&user, &100);
+}
+
+#[test]
+fn test_multisig_flow_set_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let guardians = soroban_sdk::vec![&env, g1.clone(), g2.clone()];
+    
+    // Initialize multisig with 2 guardians and threshold 2
+    client.init_multisig(&guardians, &2u32);
+
+    // 1. Propose SetPaused(true)
+    let action_data = soroban_sdk::vec![&env, true.into_val(&env)];
+    let proposal_id = client.propose_action(&g1, &ActionType::SetPaused, &soroban_sdk::String::from_str(&env, "Pause for maintenance"), &action_data);
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.action_type, ActionType::SetPaused);
+    assert_eq!(proposal.executed, false);
+
+    // 2. First approval (threshold 2 not met)
+    client.approve_action(&g1, &proposal_id);
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.executed, false);
+
+    // 3. Second approval (executes)
+    client.approve_action(&g2, &proposal_id);
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.executed, true);
+
+    // Verify contract is actually paused
+    let _user = Address::generate(&env);
+    let _res = env.as_contract(&contract_id, || {
+        let is_paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        assert!(is_paused);
+    });
+}
+
+#[test]
+#[should_panic(expected = "set_paused must go through multisig proposal")]
+fn test_set_paused_fails_when_multisig_enabled() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let g1 = Address::generate(&env);
+    let guardians = soroban_sdk::vec![&env, g1.clone()];
+    client.init_multisig(&guardians, &1u32);
+
+    // Direct call should fail
+    client.set_paused(&true);
 }
