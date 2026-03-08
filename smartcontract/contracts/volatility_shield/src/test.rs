@@ -4,6 +4,10 @@ use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address, Env, IntoVal, Map};
 
+// Import MockStrategy for integration testing
+#[cfg(test)]
+use mock_strategy::{MockStrategy, MockStrategyClient};
+
 fn create_token_contract<'a>(
     env: &Env,
     admin: &Address,
@@ -621,7 +625,7 @@ fn test_deposit_exceeds_per_user_cap() {
     env.mock_all_auths_allowing_non_root_auth();
 
     let token_admin = Address::generate(&env);
-    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
 
     let contract_id = env.register_contract(None, VolatilityShield);
     let client = VolatilityShieldClient::new(&env, &contract_id);
@@ -651,7 +655,7 @@ fn test_deposit_exceeds_global_cap() {
     env.mock_all_auths_allowing_non_root_auth();
 
     let token_admin = Address::generate(&env);
-    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
 
     let contract_id = env.register_contract(None, VolatilityShield);
     let client = VolatilityShieldClient::new(&env, &contract_id);
@@ -681,7 +685,7 @@ fn test_deposit_at_exact_cap() {
     env.mock_all_auths_allowing_non_root_auth();
 
     let token_admin = Address::generate(&env);
-    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
 
     let contract_id = env.register_contract(None, VolatilityShield);
     let client = VolatilityShieldClient::new(&env, &contract_id);
@@ -709,7 +713,7 @@ fn test_withdraw_exceeds_per_tx_cap() {
     env.mock_all_auths_allowing_non_root_auth();
 
     let token_admin = Address::generate(&env);
-    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
 
     let contract_id = env.register_contract(None, VolatilityShield);
     let client = VolatilityShieldClient::new(&env, &contract_id);
@@ -775,7 +779,7 @@ fn test_caps_not_set_allows_unlimited() {
     env.mock_all_auths_allowing_non_root_auth();
 
     let token_admin = Address::generate(&env);
-    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
 
     let contract_id = env.register_contract(None, VolatilityShield);
     let client = VolatilityShieldClient::new(&env, &contract_id);
@@ -806,7 +810,7 @@ fn test_multiple_deposits_track_cumulative() {
     env.mock_all_auths_allowing_non_root_auth();
 
     let token_admin = Address::generate(&env);
-    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
 
     let contract_id = env.register_contract(None, VolatilityShield);
     let client = VolatilityShieldClient::new(&env, &contract_id);
@@ -1022,4 +1026,162 @@ fn test_rebalance_with_zero_slippage_tolerance() {
 
     let allocations: Map<Address, i128> = Map::new(&env);
     client.rebalance(&allocations, &0u32);
+}
+
+// ── MockStrategy Integration Tests ───────────────
+
+#[test]
+fn test_mock_strategy_integration() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    // Register contracts
+    let volatility_shield_id = env.register_contract(None, VolatilityShield);
+    let volatility_shield_client = VolatilityShieldClient::new(&env, &volatility_shield_id);
+
+    let mock_strategy_id = env.register_contract(None, MockStrategy);
+    let mock_strategy_client = MockStrategyClient::new(&env, &mock_strategy_id);
+
+    // Create token
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
+
+    // Initialize contracts
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    volatility_shield_client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+    mock_strategy_client.init(&admin, &token_id);
+
+    // Add strategy to VolatilityShield
+    volatility_shield_client.add_strategy(&mock_strategy_id);
+
+    // Mint tokens to VolatilityShield for testing
+    stellar_asset_client.mint(&volatility_shield_id, &1000);
+
+    // Test rebalancing - move funds to MockStrategy
+    let mut allocations: Map<Address, i128> = Map::new(&env);
+    allocations.set(mock_strategy_id.clone(), 500);
+
+    volatility_shield_client.rebalance(&allocations, &0u32);
+
+    // Verify MockStrategy balance
+    assert_eq!(mock_strategy_client.balance(), 500);
+
+    // Test rebalancing - move funds back from MockStrategy
+    let mut allocations: Map<Address, i128> = Map::new(&env);
+    allocations.set(mock_strategy_id, 200);
+
+    volatility_shield_client.rebalance(&allocations, &0u32);
+
+    // Verify updated balance
+    assert_eq!(mock_strategy_client.balance(), 200);
+}
+
+#[test]
+fn test_mock_strategy_deposit_withdraw_flow() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    // Register contracts
+    let volatility_shield_id = env.register_contract(None, VolatilityShield);
+    let volatility_shield_client = VolatilityShieldClient::new(&env, &volatility_shield_id);
+
+    let mock_strategy_id = env.register_contract(None, MockStrategy);
+    let mock_strategy_client = MockStrategyClient::new(&env, &mock_strategy_id);
+
+    // Create token
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
+
+    // Initialize contracts
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    volatility_shield_client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+    mock_strategy_client.init(&admin, &token_id);
+
+    // Add strategy to VolatilityShield
+    volatility_shield_client.add_strategy(&mock_strategy_id);
+
+    // Mint tokens to VolatilityShield for testing
+    stellar_asset_client.mint(&volatility_shield_id, &1000);
+
+    // Test: Move funds to MockStrategy
+    let mut allocations: Map<Address, i128> = Map::new(&env);
+    allocations.set(mock_strategy_id.clone(), 300);
+
+    volatility_shield_client.rebalance(&allocations, &0u32);
+
+    // Verify funds moved to MockStrategy
+    assert_eq!(mock_strategy_client.balance(), 300);
+
+    // Test: Move all funds back from MockStrategy
+    let mut allocations: Map<Address, i128> = Map::new(&env);
+    allocations.set(mock_strategy_id, 0);
+
+    volatility_shield_client.rebalance(&allocations, &0u32);
+
+    // Verify all funds withdrawn
+    assert_eq!(mock_strategy_client.balance(), 0);
+}
+
+#[test]
+fn test_multiple_mock_strategies() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    // Register contracts
+    let volatility_shield_id = env.register_contract(None, VolatilityShield);
+    let volatility_shield_client = VolatilityShieldClient::new(&env, &volatility_shield_id);
+
+    let mock_strategy1_id = env.register_contract(None, MockStrategy);
+    let mock_strategy1_client = MockStrategyClient::new(&env, &mock_strategy1_id);
+
+    let mock_strategy2_id = env.register_contract(None, MockStrategy);
+    let mock_strategy2_client = MockStrategyClient::new(&env, &mock_strategy2_id);
+
+    // Create token
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
+
+    // Initialize contracts
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    volatility_shield_client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+    mock_strategy1_client.init(&admin, &token_id);
+    mock_strategy2_client.init(&admin, &token_id);
+
+    // Add strategies to VolatilityShield
+    volatility_shield_client.add_strategy(&mock_strategy1_id);
+    volatility_shield_client.add_strategy(&mock_strategy2_id);
+
+    // Mint tokens to VolatilityShield for testing
+    stellar_asset_client.mint(&volatility_shield_id, &1000);
+
+    // Test: Distribute funds across strategies
+    let mut allocations: Map<Address, i128> = Map::new(&env);
+    allocations.set(mock_strategy1_id.clone(), 400);
+    allocations.set(mock_strategy2_id.clone(), 600);
+
+    volatility_shield_client.rebalance(&allocations, &0u32);
+
+    // Verify balances
+    assert_eq!(mock_strategy1_client.balance(), 400);
+    assert_eq!(mock_strategy2_client.balance(), 600);
+
+    // Test: Rebalance to different allocation
+    let mut allocations: Map<Address, i128> = Map::new(&env);
+    allocations.set(mock_strategy1_id, 300);
+    allocations.set(mock_strategy2_id, 700);
+
+    volatility_shield_client.rebalance(&allocations, &0u32);
+
+    // Verify updated balances
+    assert_eq!(mock_strategy1_client.balance(), 300);
+    assert_eq!(mock_strategy2_client.balance(), 700);
 }
