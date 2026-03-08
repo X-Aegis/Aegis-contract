@@ -15,7 +15,30 @@ fn create_token_contract<'a>(
 }
 
 #[test]
-fn test_init_stores_roles() {
+fn test_init_comprehensive() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fee_percentage = 250u32; // 2.5%
+
+    client.init(&admin, &asset, &oracle, &treasury, &fee_percentage);
+
+    assert_eq!(client.get_admin(), admin);
+    assert_eq!(client.get_asset(), asset);
+    assert_eq!(client.get_oracle(), oracle);
+    assert_eq!(client.treasury(), treasury);
+    assert_eq!(client.fee_percentage(), fee_percentage);
+    assert_eq!(client.get_strategies().len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Already initialized")]
+fn test_init_already_initialized() {
     let env = Env::default();
     let contract_id = env.register_contract(None, VolatilityShield);
     let client = VolatilityShieldClient::new(&env, &contract_id);
@@ -25,13 +48,9 @@ fn test_init_stores_roles() {
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    client.init(&admin, &asset, &oracle, &treasury, &500u32);
-
-    assert_eq!(client.get_admin(), admin);
-    assert_eq!(client.get_oracle(), oracle);
-    assert_eq!(client.get_asset(), asset);
-    assert_eq!(client.treasury(), treasury);
-    assert_eq!(client.fee_percentage(), 500u32);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    // Should panic
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
 }
 
 #[test]
