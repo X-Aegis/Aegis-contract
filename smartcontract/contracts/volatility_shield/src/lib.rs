@@ -389,11 +389,14 @@ impl VolatilityShield {
         if total_shares == 0 || total_assets == 0 {
             return amount;
         }
-        amount
-            .checked_mul(total_shares)
-            .unwrap()
-            .checked_div(total_assets)
-            .unwrap()
+
+        // Use I256 to prevent overflow during (amount * total_shares)
+        let amount_256 = soroban_sdk::I256::from_i128(&env, amount);
+        let total_shares_256 = soroban_sdk::I256::from_i128(&env, total_shares);
+        let total_assets_256 = soroban_sdk::I256::from_i128(&env, total_assets);
+
+        let res_256 = amount_256.mul(&total_shares_256).div(&total_assets_256);
+        res_256.to_i128().expect("result overflow")
     }
 
     pub fn convert_to_assets(env: Env, shares: i128) -> i128 {
@@ -405,11 +408,14 @@ impl VolatilityShield {
         if total_shares == 0 {
             return shares;
         }
-        shares
-            .checked_mul(total_assets)
-            .unwrap()
-            .checked_div(total_shares)
-            .unwrap()
+
+        // Use I256 to prevent overflow during (shares * total_assets)
+        let shares_256 = soroban_sdk::I256::from_i128(&env, shares);
+        let total_assets_256 = soroban_sdk::I256::from_i128(&env, total_assets);
+        let total_shares_256 = soroban_sdk::I256::from_i128(&env, total_shares);
+
+        let res_256 = shares_256.mul(&total_assets_256).div(&total_shares_256);
+        res_256.to_i128().expect("result overflow")
     }
 
     pub fn set_total_assets(env: Env, amount: i128) {
