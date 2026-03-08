@@ -2,7 +2,7 @@
 use super::*;
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient;
-use soroban_sdk::{testutils::Address as _, Address, Env, IntoVal, Map};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address, Env, IntoVal, Map};
 
 fn create_token_contract<'a>(
     env: &Env,
@@ -246,7 +246,7 @@ fn test_rebalance_admin_auth_accepted() {
     client.init(&admin, &asset, &oracle, &treasury, &0u32);
 
     let allocations: Map<Address, i128> = Map::new(&env);
-    client.rebalance(&allocations);
+    client.rebalance(&allocations, &0u32);
 }
 
 #[test]
@@ -274,6 +274,76 @@ fn test_pause_circuit_breaker() {
     client.deposit(&user, &100);
 }
 
+// ── Rebalance Delta Calculation Tests ─────────────────
+
+#[test]
+fn test_calc_rebalance_delta_positive() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current is 100, Target is 150. Delta should be +50
+    let delta = client.calc_rebalance_delta(&100, &150);
+    assert_eq!(delta, 50);
+}
+
+#[test]
+fn test_calc_rebalance_delta_negative() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current is 200, Target is 50. Delta should be -150
+    let delta = client.calc_rebalance_delta(&200, &50);
+    assert_eq!(delta, -150);
+}
+
+#[test]
+fn test_calc_rebalance_delta_identical() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current matches Target. Delta should be 0.
+    let delta = client.calc_rebalance_delta(&100, &100);
+    assert_eq!(delta, 0);
+}
+
+#[test]
+fn test_calc_rebalance_delta_zero_current() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current is 0, Target is 100. Delta should be +100.
+    let delta = client.calc_rebalance_delta(&0, &100);
+    assert_eq!(delta, 100);
+}
+
+#[test]
+fn test_calc_rebalance_delta_zero_target() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Current is 100, Target is 0. Delta should be -100.
+    let delta = client.calc_rebalance_delta(&100, &0);
+    assert_eq!(delta, -100);
+}
+
+#[test]
+#[should_panic(expected = "Balances cannot be negative")]
+fn test_calc_rebalance_delta_negative_inputs_panic() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    // Should panic on negative balances
+    client.calc_rebalance_delta(&-50, &100);
+}
+
+// ── Multisig Flow Tests ───────────────────────────────
+
 #[test]
 fn test_multisig_flow_set_paused() {
     let env = Env::default();
@@ -298,28 +368,52 @@ fn test_multisig_flow_set_paused() {
 
     // 1. Propose SetPaused(true)
     let action_data = soroban_sdk::vec![&env, true.into_val(&env)];
-    let proposal_id = client.propose_action(&g1, &ActionType::SetPaused, &soroban_sdk::String::from_str(&env, "Pause for maintenance"), &action_data);
+    let proposal_id = client.propose_multisig_action(&g1, &ActionType::SetPaused, &soroban_sdk::String::from_str(&env, "Pause for maintenance"), &action_data);
 
     let proposal = client.get_proposal(&proposal_id);
     assert_eq!(proposal.action_type, ActionType::SetPaused);
     assert_eq!(proposal.executed, false);
 
     // 2. First approval (threshold 2 not met)
-    client.approve_action(&g1, &proposal_id);
+    client.approve_multisig_action(&g1, &proposal_id);
     let proposal = client.get_proposal(&proposal_id);
     assert_eq!(proposal.executed, false);
 
     // 3. Second approval (executes)
-    client.approve_action(&g2, &proposal_id);
+    client.approve_multisig_action(&g2, &proposal_id);
     let proposal = client.get_proposal(&proposal_id);
     assert_eq!(proposal.executed, true);
 
     // Verify contract is actually paused
-    let _user = Address::generate(&env);
-    let _res = env.as_contract(&contract_id, || {
-        let is_paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
-        assert!(is_paused);
+    let is_paused: bool = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
     });
+    assert!(is_paused);
+}
+
+// ── Deposit & Withdrawal Cap Tests ─────────────────────
+
+#[test]
+fn test_set_deposit_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // Set caps
+    client.set_deposit_cap(&1000, &5000);
+
+    let (per_user, global) = client.get_deposit_cap();
+    assert_eq!(per_user, 1000);
+    assert_eq!(global, 5000);
 }
 
 #[test]
@@ -344,4 +438,433 @@ fn test_set_paused_fails_when_multisig_enabled() {
 
     // Direct call should fail
     client.set_paused(&true);
+}
+
+#[test]
+fn test_set_withdraw_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    client.set_withdraw_cap(&500);
+    assert_eq!(client.get_withdraw_cap(), 500);
+}
+
+#[test]
+#[should_panic(expected = "deposit exceeds per-user cap")]
+fn test_deposit_exceeds_per_user_cap() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+    client.set_deposit_cap(&100, &10000); // per-user cap = 100
+
+    let user = Address::generate(&env);
+    stellar_asset_client.mint(&user, &200);
+
+    // First deposit of 60 should succeed
+    client.deposit(&user, &60);
+    assert_eq!(client.get_user_deposited(&user), 60);
+
+    // Second deposit of 50 should fail (60 + 50 = 110 > 100)
+    client.deposit(&user, &50);
+}
+
+#[test]
+#[should_panic(expected = "deposit exceeds global cap")]
+fn test_deposit_exceeds_global_cap() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+    client.set_deposit_cap(&10000, &200); // global cap = 200
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    stellar_asset_client.mint(&user1, &200);
+    stellar_asset_client.mint(&user2, &200);
+
+    // User1 deposits 150
+    client.deposit(&user1, &150);
+
+    // User2 tries to deposit 100 (total would be 250 > 200)
+    client.deposit(&user2, &100);
+}
+
+#[test]
+fn test_deposit_at_exact_cap() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+    client.set_deposit_cap(&100, &500); // per-user cap = 100, global = 500
+
+    let user = Address::generate(&env);
+    stellar_asset_client.mint(&user, &200);
+
+    // Deposit exactly at the per-user cap should succeed
+    client.deposit(&user, &100);
+    assert_eq!(client.get_user_deposited(&user), 100);
+    assert_eq!(client.total_assets(), 100);
+}
+
+#[test]
+#[should_panic(expected = "withdrawal exceeds per-transaction cap")]
+fn test_withdraw_exceeds_per_tx_cap() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    // Setup vault with 1:1 ratio
+    client.set_total_shares(&1000);
+    client.set_total_assets(&1000);
+
+    let user = Address::generate(&env);
+    client.set_balance(&user, &500);
+    stellar_asset_client.mint(&contract_id, &1000);
+
+    // Set withdraw cap to 100 per tx
+    client.set_withdraw_cap(&100);
+
+    // Withdraw 200 shares => 200 assets, exceeds 100 cap
+    client.withdraw(&user, &200);
+}
+
+#[test]
+fn test_withdraw_within_cap() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    // Setup vault with 1:1 ratio
+    client.set_total_shares(&1000);
+    client.set_total_assets(&1000);
+
+    let user = Address::generate(&env);
+    client.set_balance(&user, &500);
+    stellar_asset_client.mint(&contract_id, &1000);
+
+    // Set withdraw cap to 100 per tx
+    client.set_withdraw_cap(&100);
+
+    // Withdraw 50 shares => 50 assets, within cap
+    client.withdraw(&user, &50);
+    assert_eq!(client.balance(&user), 450);
+    assert_eq!(token_client.balance(&user), 50);
+}
+
+#[test]
+fn test_caps_not_set_allows_unlimited() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    // No caps set — defaults should be (0, 0) and 0
+    let (per_user, global) = client.get_deposit_cap();
+    assert_eq!(per_user, 0);
+    assert_eq!(global, 0);
+    assert_eq!(client.get_withdraw_cap(), 0);
+
+    let user = Address::generate(&env);
+    stellar_asset_client.mint(&user, &1_000_000);
+
+    // Large deposit should succeed with no caps
+    client.deposit(&user, &1_000_000);
+    assert_eq!(client.total_assets(), 1_000_000);
+}
+
+#[test]
+fn test_multiple_deposits_track_cumulative() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+    client.set_deposit_cap(&500, &10000);
+
+    let user = Address::generate(&env);
+    stellar_asset_client.mint(&user, &1000);
+
+    // Deposit in 3 batches
+    client.deposit(&user, &100);
+    assert_eq!(client.get_user_deposited(&user), 100);
+
+    client.deposit(&user, &200);
+    assert_eq!(client.get_user_deposited(&user), 300);
+
+    client.deposit(&user, &150);
+    assert_eq!(client.get_user_deposited(&user), 450);
+
+    // Total deposited = 450, next 60 would exceed 500 cap
+    // Verify the balance is tracked correctly
+    assert_eq!(client.total_assets(), 450);
+}
+
+// ── Timelock Tests ───────────────────────────
+
+#[test]
+fn test_set_timelock_duration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    client.set_timelock_duration(&86400u64);
+    assert_eq!(client.get_timelock_duration(), 86400u64);
+}
+
+#[test]
+fn test_propose_action_stores_timestamp() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_timelock_duration(&100u64);
+
+    let timestamp = client.propose_action();
+    assert_eq!(timestamp, 1000);
+    assert_eq!(client.get_timelock_proposal_timestamp(), timestamp);
+}
+
+#[test]
+#[should_panic(expected = "timelock duration not set")]
+fn test_propose_action_without_duration_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    client.propose_action();
+}
+
+#[test]
+#[should_panic(expected = "timelock not elapsed")]
+fn test_execute_action_before_timelock_expires_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_timelock_duration(&86400u64);
+
+    client.propose_action();
+
+    client.execute_action();
+}
+
+#[test]
+fn test_execute_action_after_timelock_expires() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_timelock_duration(&100u64);
+
+    let timestamp = client.propose_action();
+    assert_eq!(timestamp, 1000);
+
+    env.ledger().set_timestamp(timestamp + 101);
+
+    let execution_timestamp = client.execute_action();
+    assert!(execution_timestamp > timestamp);
+}
+
+#[test]
+#[should_panic(expected = "timelock not set")]
+fn test_execute_action_without_proposal_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_timelock_duration(&100u64);
+
+    client.execute_action();
+}
+
+#[test]
+fn test_timelock_default_duration_is_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    assert_eq!(client.get_timelock_duration(), 0u64);
+}
+
+#[test]
+fn test_get_timelock_proposal_timestamp_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    assert_eq!(client.get_timelock_proposal_timestamp(), 0u64);
+}
+
+// ── Slippage Protection Tests ─────────────────
+
+#[test]
+fn test_rebalance_with_zero_slippage_tolerance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let allocations: Map<Address, i128> = Map::new(&env);
+    client.rebalance(&allocations, &0u32);
 }
