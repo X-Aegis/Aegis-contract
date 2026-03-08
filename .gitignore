@@ -2,3 +2,5 @@ target/
 ** /target/
 smartcontract/target/
 .soroban/
+test_snapshots/
+proptest-regressions/
