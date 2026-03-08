@@ -294,6 +294,55 @@ fn test_pause_circuit_breaker() {
 }
 
 #[test]
+fn test_deposit_flow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 1000i128;
+
+    // Mint tokens to user
+    stellar_asset_client.mint(&user, &deposit_amount);
+    assert_eq!(token_client.balance(&user), deposit_amount);
+
+    // Initial state check
+    assert_eq!(client.total_shares(), 0);
+    assert_eq!(client.total_assets(), 0);
+
+    // Perform deposit
+    client.deposit(&user, &deposit_amount);
+
+    // Verify balances after deposit
+    assert_eq!(token_client.balance(&user), 0);
+    assert_eq!(token_client.balance(&contract_id), deposit_amount);
+    assert_eq!(client.balance(&user), deposit_amount); // 1:1 since total_shares was 0
+    assert_eq!(client.total_shares(), deposit_amount);
+    assert_eq!(client.total_assets(), deposit_amount);
+}
+
+#[test]
+#[should_panic(expected = "deposit amount must be positive")]
+fn test_deposit_amount_zero() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+    client.deposit(&user, &0);
+}
+
+#[test]
 fn test_fuzz_math_symmetry() {
     proptest::proptest!(
         proptest::prelude::ProptestConfig::with_cases(100),
