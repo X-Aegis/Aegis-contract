@@ -1023,3 +1023,178 @@ fn test_rebalance_with_zero_slippage_tolerance() {
     let allocations: Map<Address, i128> = Map::new(&env);
     client.rebalance(&allocations, &0u32);
 }
+
+// ── Guardian Management Tests ─────────────────
+
+#[test]
+fn test_add_guardian() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    
+    let g1 = Address::generate(&env);
+    let guardians = soroban_sdk::vec![&env, g1.clone()];
+    client.init_multisig(&guardians, &1u32);
+
+    let g2 = Address::generate(&env);
+    client.add_guardian(&g2);
+    
+    let updated_guardians = client.get_guardians();
+    assert_eq!(updated_guardians.len(), 2);
+    assert!(updated_guardians.contains(g2));
+}
+
+#[test]
+#[should_panic(expected = "Guardian already exists")]
+fn test_add_existing_guardian_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    
+    let g1 = Address::generate(&env);
+    let guardians = soroban_sdk::vec![&env, g1.clone()];
+    client.init_multisig(&guardians, &1u32);
+
+    client.add_guardian(&g1);
+}
+
+#[test]
+fn test_remove_guardian() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let guardians = soroban_sdk::vec![&env, g1.clone(), g2.clone()];
+    client.init_multisig(&guardians, &1u32);
+
+    client.remove_guardian(&g1);
+    
+    let updated_guardians = client.get_guardians();
+    assert_eq!(updated_guardians.len(), 1);
+    assert!(!updated_guardians.contains(g1));
+    assert!(updated_guardians.contains(g2));
+}
+
+#[test]
+#[should_panic(expected = "Cannot remove guardian: would break threshold")]
+fn test_remove_guardian_breaks_threshold_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let guardians = soroban_sdk::vec![&env, g1.clone(), g2.clone()];
+    client.init_multisig(&guardians, &2u32);
+
+    // Initial guardians = 2, threshold = 2. Removing one makes guardians = 1, violating threshold <= guardians.
+    client.remove_guardian(&g1);
+}
+
+#[test]
+fn test_set_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let guardians = soroban_sdk::vec![&env, g1.clone(), g2.clone()];
+    client.init_multisig(&guardians, &1u32);
+
+    client.set_threshold(&2u32);
+    assert_eq!(client.get_threshold(), 2);
+}
+
+#[test]
+#[should_panic(expected = "Threshold cannot be greater than guardians count")]
+fn test_set_threshold_greater_than_guardians_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    
+    let g1 = Address::generate(&env);
+    let guardians = soroban_sdk::vec![&env, g1.clone()];
+    client.init_multisig(&guardians, &1u32);
+
+    client.set_threshold(&2u32);
+}
+
+#[test]
+#[should_panic(expected = "Threshold must be at least 1")]
+fn test_set_threshold_zero_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    
+    let g1 = Address::generate(&env);
+    let guardians = soroban_sdk::vec![&env, g1.clone()];
+    client.init_multisig(&guardians, &1u32);
+
+    client.set_threshold(&0u32);
+}
