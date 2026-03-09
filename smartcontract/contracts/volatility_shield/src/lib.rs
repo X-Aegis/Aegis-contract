@@ -42,7 +42,7 @@ pub enum DataKey {
     Balance(Address),
     Paused,
     Guardians,
-    Requirement,
+    Threshold,
     Proposal(u64),
     Signatures(u64),
     NextProposalId,
@@ -147,18 +147,18 @@ impl VolatilityShield {
     }
 
     /// Set up multisig guardians and threshold.
-    pub fn init_multisig(env: Env, guardians: Vec<Address>, requirement: u32) {
+    pub fn init_multisig(env: Env, guardians: Vec<Address>, threshold: u32) {
         let admin = Self::get_admin(&env);
         admin.require_auth();
 
-        if guardians.len() < requirement as u32 {
-            panic!("Guardians count must be >= requirement");
+        if guardians.len() < threshold as u32 {
+            panic!("Guardians count must be >= threshold");
         }
 
         env.storage().instance().set(&DataKey::Guardians, &guardians);
         env.storage()
             .instance()
-            .set(&DataKey::Requirement, &requirement);
+            .set(&DataKey::Threshold, &threshold);
     }
 
     pub fn propose_multisig_action(
@@ -229,8 +229,8 @@ impl VolatilityShield {
             .persistent()
             .set(&DataKey::Signatures(proposal_id), &signatures);
 
-        let requirement = Self::get_requirement(&env);
-        if signatures.len() >= requirement {
+        let threshold = Self::get_threshold(&env);
+        if signatures.len() >= threshold {
             Self::execute_multisig_proposal(&env, &mut proposal);
         }
 
@@ -294,8 +294,8 @@ impl VolatilityShield {
         let admin = Self::get_admin(&env);
         admin.require_auth();
 
-        let requirement = Self::get_requirement(&env);
-        if requirement > 0 {
+        let threshold = Self::get_threshold(&env);
+        if threshold > 0 {
             panic!("set_paused must go through multisig proposal");
         }
 
@@ -576,8 +576,8 @@ impl VolatilityShield {
 
         Self::require_admin_or_oracle(&env, &admin, &oracle);
 
-        let requirement = Self::get_requirement(&env);
-        if requirement > 0 {
+        let threshold = Self::get_threshold(&env);
+        if threshold > 0 {
             panic!("rebalance must go through multisig proposal");
         }
 
@@ -667,8 +667,8 @@ impl VolatilityShield {
         let admin = Self::get_admin(&env);
         admin.require_auth();
 
-        let requirement = Self::get_requirement(&env);
-        if requirement > 0 {
+        let threshold = Self::get_threshold(&env);
+        if threshold > 0 {
             panic!("add_strategy must go through multisig proposal");
         }
 
@@ -793,11 +793,76 @@ impl VolatilityShield {
             .unwrap_or(Vec::new(env))
     }
 
-    pub fn get_requirement(env: &Env) -> u32 {
+    pub fn get_threshold(env: &Env) -> u32 {
         env.storage()
             .instance()
-            .get(&DataKey::Requirement)
+            .get(&DataKey::Threshold)
             .unwrap_or(0)
+    }
+
+    // ── Guardian Management (Admin Only) ──────
+    pub fn add_guardian(env: Env, guardian: Address) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+
+        let mut guardians = Self::get_guardians(&env);
+        if guardians.contains(guardian.clone()) {
+            panic!("Guardian already exists");
+        }
+
+        guardians.push_back(guardian.clone());
+        env.storage().instance().set(&DataKey::Guardians, &guardians);
+
+        env.events().publish(
+            (symbol_short!("Guardian"), symbol_short!("added")),
+            guardian,
+        );
+    }
+
+    pub fn remove_guardian(env: Env, guardian: Address) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+
+        let mut guardians = Self::get_guardians(&env);
+        if let Some(index) = guardians.first_index_of(guardian.clone()) {
+            guardians.remove(index);
+            
+            // Check threshold validity
+            let threshold = Self::get_threshold(&env);
+            if (guardians.len() as u32) < threshold {
+                panic!("Cannot remove guardian: would break threshold");
+            }
+
+            env.storage().instance().set(&DataKey::Guardians, &guardians);
+
+            env.events().publish(
+                (symbol_short!("Guardian"), symbol_short!("removed")),
+                guardian,
+            );
+        } else {
+            panic!("Guardian not found");
+        }
+    }
+
+    pub fn set_threshold(env: Env, threshold: u32) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+
+        let guardians = Self::get_guardians(&env);
+        if guardians.len() < threshold as u32 {
+            panic!("Threshold cannot be greater than guardians count");
+        }
+
+        if threshold == 0 {
+            panic!("Threshold must be at least 1");
+        }
+
+        env.storage().instance().set(&DataKey::Threshold, &threshold);
+
+        env.events().publish(
+            (symbol_short!("Guardian"), symbol_short!("thr_set")),
+            threshold,
+        );
     }
 
     pub fn get_proposal(env: &Env, id: u64) -> Proposal {
