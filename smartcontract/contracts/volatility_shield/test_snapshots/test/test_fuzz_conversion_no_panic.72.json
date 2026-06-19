@@ -48,6 +48,22 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "AcceptedAssets"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Admin"
                             }
                           ]
@@ -126,8 +142,8 @@
                         },
                         "val": {
                           "i128": {
-                            "hi": 47984,
-                            "lo": 16773781637787342488
+                            "hi": 7622,
+                            "lo": 9007825777749884239
                           }
                         }
                       },
@@ -141,8 +157,8 @@
                         },
                         "val": {
                           "i128": {
-                            "hi": 10808,
-                            "lo": 14226785253762301108
+                            "hi": 10157,
+                            "lo": 1705556447879246995
                           }
                         }
                       },

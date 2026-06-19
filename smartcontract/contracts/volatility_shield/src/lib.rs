@@ -68,6 +68,8 @@ pub enum DataKey {
     Version,
     /// Maximum number of strategies allowed (introduced in v2). 0 = uncapped.
     MaxStrategies,
+    AcceptedAssets,
+    AssetBalance(Address),
 }
 
 #[contracttype]
@@ -163,6 +165,30 @@ impl VolatilityShield {
         env.storage()
             .instance()
             .set(&DataKey::Version, &CURRENT_VERSION);
+
+        let mut accepted_assets = Vec::<Address>::new(&env);
+        accepted_assets.push_back(asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::AcceptedAssets, &accepted_assets);
+    }
+
+    /// Add a stablecoin asset to the vault whitelist. Admin only.
+    pub fn add_accepted_asset(env: Env, asset: Address) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+
+        let mut accepted = Self::get_accepted_assets(env.clone());
+        if accepted.contains(asset.clone()) {
+            return;
+        }
+        accepted.push_back(asset.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::AcceptedAssets, &accepted);
+
+        env.events()
+            .publish((symbol_short!("Asset"), symbol_short!("added")), asset);
     }
 
     // ── Upgrade & Migration ───────────────────
@@ -186,6 +212,7 @@ impl VolatilityShield {
     /// New fields introduced per version:
     ///   v2 – `DataKey::MaxStrategies` (u32, 0 = uncapped) initialised to 0
     ///         for existing deployments that predate the cap.
+    ///         `DataKey::AcceptedAssets` backfilled from the primary asset.
     pub fn migrate(env: Env, new_version: u32) -> Result<(), Error> {
         let admin = Self::get_admin(&env);
         admin.require_auth();
@@ -207,6 +234,14 @@ impl VolatilityShield {
                     env.storage()
                         .instance()
                         .set(&DataKey::MaxStrategies, &0u32);
+                }
+                if !env.storage().instance().has(&DataKey::AcceptedAssets) {
+                    let asset = Self::get_asset(&env);
+                    let mut accepted_assets = Vec::<Address>::new(&env);
+                    accepted_assets.push_back(asset);
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::AcceptedAssets, &accepted_assets);
                 }
             }
             _ => {
@@ -533,12 +568,15 @@ impl VolatilityShield {
     }
 
     // ── Deposit ───────────────────────────────
-    pub fn deposit(env: Env, from: Address, amount: i128) {
+    pub fn deposit(env: Env, from: Address, asset: Address, amount: i128) {
         Self::assert_min_version(&env, CURRENT_VERSION).expect("migration required");
         Self::assert_not_paused(&env);
 
         if amount <= 0 {
             panic!("deposit amount must be positive");
+        }
+        if !Self::is_accepted_asset(&env, &asset) {
+            panic!("asset not accepted");
         }
         from.require_auth();
 
@@ -582,12 +620,22 @@ impl VolatilityShield {
             }
         }
 
-        let token: Address = env
+        token::Client::new(&env, &asset).transfer(
+            &from,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let asset_balance_key = DataKey::AssetBalance(asset.clone());
+        let current_asset_balance: i128 = env
             .storage()
             .instance()
-            .get(&DataKey::Token)
-            .expect("Token not initialized");
-        token::Client::new(&env, &token).transfer(&from, &env.current_contract_address(), &amount);
+            .get(&asset_balance_key)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &asset_balance_key,
+            &(current_asset_balance.checked_add(amount).unwrap()),
+        );
 
         let shares_to_mint = Self::convert_to_shares(env.clone(), amount);
 
@@ -610,8 +658,10 @@ impl VolatilityShield {
         );
         Self::set_total_assets(env.clone(), new_total);
 
-        env.events()
-            .publish((symbol_short!("Deposit"), from.clone()), amount);
+        env.events().publish(
+            (symbol_short!("Deposit"), from.clone(), asset),
+            amount,
+        );
     }
 
     // ── Withdraw ──────────────────────────────
@@ -1025,6 +1075,22 @@ impl VolatilityShield {
             .unwrap_or(0)
     }
 
+    /// Returns the whitelisted stablecoin assets accepted by the vault.
+    pub fn get_accepted_assets(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AcceptedAssets)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns the vault's balance for a specific accepted asset.
+    pub fn get_asset_balance(env: Env, asset: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AssetBalance(asset))
+            .unwrap_or(0)
+    }
+
     // ── Internal Helpers ──────────────────────
     fn assert_not_paused(env: &Env) {
         let is_paused: bool = env
@@ -1112,6 +1178,10 @@ impl VolatilityShield {
         } else {
             oracle.require_auth();
         }
+    }
+
+    fn is_accepted_asset(env: &Env, asset: &Address) -> bool {
+        Self::get_accepted_assets(env.clone()).contains(asset.clone())
     }
 
     /// Panics with `MigrationRequired` if the stored schema version is below

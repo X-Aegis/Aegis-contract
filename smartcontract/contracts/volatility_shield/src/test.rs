@@ -38,6 +38,8 @@ fn test_init_comprehensive() {
     assert_eq!(client.treasury(), treasury);
     assert_eq!(client.fee_percentage(), fee_percentage);
     assert_eq!(client.get_strategies().len(), 0);
+    assert_eq!(client.get_accepted_assets().len(), 1);
+    assert_eq!(client.get_accepted_assets().get(0).unwrap(), asset);
 }
 
 #[test]
@@ -237,7 +239,7 @@ fn test_withdraw_flow_complete() {
 
     // 1. Setup: Deposit 1000 tokens
     stellar_asset_client.mint(&user, &deposit_amount);
-    client.deposit(&user, &deposit_amount);
+    client.deposit(&user, &token_id, &deposit_amount);
 
     assert_eq!(client.balance(&user), 1000);
     assert_eq!(client.total_shares(), 1000);
@@ -322,7 +324,7 @@ fn test_pause_circuit_breaker() {
     let user = Address::generate(&env);
 
     // This should panic because the contract is paused
-    client.deposit(&user, &100);
+    client.deposit(&user, &asset, &100);
 }
 
 #[test]
@@ -354,7 +356,7 @@ fn test_deposit_flow() {
     assert_eq!(client.total_assets(), 0);
 
     // Perform deposit
-    client.deposit(&user, &deposit_amount);
+    client.deposit(&user, &token_id, &deposit_amount);
 
     // Verify balances after deposit
     assert_eq!(token_client.balance(&user), 0);
@@ -371,7 +373,8 @@ fn test_deposit_amount_zero() {
     let contract_id = env.register_contract(None, VolatilityShield);
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let user = Address::generate(&env);
-    client.deposit(&user, &0);
+    let asset = Address::generate(&env);
+    client.deposit(&user, &asset, &0);
 }
 
 #[test]
@@ -641,11 +644,11 @@ fn test_deposit_exceeds_per_user_cap() {
     stellar_asset_client.mint(&user, &200);
 
     // First deposit of 60 should succeed
-    client.deposit(&user, &60);
+    client.deposit(&user, &token_id, &60);
     assert_eq!(client.get_user_deposited(&user), 60);
 
     // Second deposit of 50 should fail (60 + 50 = 110 > 100)
-    client.deposit(&user, &50);
+    client.deposit(&user, &token_id, &50);
 }
 
 #[test]
@@ -673,10 +676,10 @@ fn test_deposit_exceeds_global_cap() {
     stellar_asset_client.mint(&user2, &200);
 
     // User1 deposits 150
-    client.deposit(&user1, &150);
+    client.deposit(&user1, &token_id, &150);
 
     // User2 tries to deposit 100 (total would be 250 > 200)
-    client.deposit(&user2, &100);
+    client.deposit(&user2, &token_id, &100);
 }
 
 #[test]
@@ -701,7 +704,7 @@ fn test_deposit_at_exact_cap() {
     stellar_asset_client.mint(&user, &200);
 
     // Deposit exactly at the per-user cap should succeed
-    client.deposit(&user, &100);
+    client.deposit(&user, &token_id, &100);
     assert_eq!(client.get_user_deposited(&user), 100);
     assert_eq!(client.total_assets(), 100);
 }
@@ -800,7 +803,7 @@ fn test_caps_not_set_allows_unlimited() {
     stellar_asset_client.mint(&user, &1_000_000);
 
     // Large deposit should succeed with no caps
-    client.deposit(&user, &1_000_000);
+    client.deposit(&user, &token_id, &1_000_000);
     assert_eq!(client.total_assets(), 1_000_000);
 }
 
@@ -826,13 +829,13 @@ fn test_multiple_deposits_track_cumulative() {
     stellar_asset_client.mint(&user, &1000);
 
     // Deposit in 3 batches
-    client.deposit(&user, &100);
+    client.deposit(&user, &token_id, &100);
     assert_eq!(client.get_user_deposited(&user), 100);
 
-    client.deposit(&user, &200);
+    client.deposit(&user, &token_id, &200);
     assert_eq!(client.get_user_deposited(&user), 300);
 
-    client.deposit(&user, &150);
+    client.deposit(&user, &token_id, &150);
     assert_eq!(client.get_user_deposited(&user), 450);
 
     // Total deposited = 450, next 60 would exceed 500 cap
@@ -1465,7 +1468,7 @@ fn test_v2_preserves_existing_state_after_migration() {
     // Deposit some funds before migration.
     let user = Address::generate(&env);
     stellar_asset_client.mint(&user, &1000);
-    client.deposit(&user, &1000);
+    client.deposit(&user, &token_id, &1000);
 
     let balance_before = client.balance(&user);
 
@@ -1478,4 +1481,145 @@ fn test_v2_preserves_existing_state_after_migration() {
     assert_eq!(client.balance(&user), balance_before);
     assert_eq!(client.get_version(), 2);
     assert_eq!(client.get_max_strategies(), 0);
+    assert_eq!(client.get_accepted_assets().len(), 1);
+    assert_eq!(client.get_accepted_assets().get(0).unwrap(), token_id);
+}
+
+// ── Multi-Asset Tests ────────────────────────
+
+#[test]
+fn test_add_accepted_asset() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let (token1, _, _) = create_token_contract(&env, &token_admin);
+    let (token2, _, _) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token1, &oracle, &treasury, &0u32);
+    assert_eq!(client.get_accepted_assets().len(), 1);
+
+    client.add_accepted_asset(&token2);
+
+    let accepted = client.get_accepted_assets();
+    assert_eq!(accepted.len(), 2);
+    assert_eq!(accepted.get(0).unwrap(), token1);
+    assert_eq!(accepted.get(1).unwrap(), token2);
+
+    client.add_accepted_asset(&token2);
+    assert_eq!(client.get_accepted_assets().len(), 2);
+}
+
+#[test]
+#[should_panic(expected = "asset not accepted")]
+fn test_deposit_unaccepted_asset() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token1, _, _) = create_token_contract(&env, &token_admin);
+    let (token2, stellar_asset_client2, _) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin, &token1, &oracle, &treasury, &0u32);
+
+    stellar_asset_client2.mint(&user, &100);
+    client.deposit(&user, &token2, &100);
+}
+
+#[test]
+fn test_multi_asset_deposits() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token1, stellar_asset_client1, token_client1) =
+        create_token_contract(&env, &token_admin);
+    let (token2, stellar_asset_client2, token_client2) =
+        create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.init(&admin, &token1, &oracle, &treasury, &0u32);
+    client.add_accepted_asset(&token2);
+
+    stellar_asset_client1.mint(&user1, &1000);
+    stellar_asset_client2.mint(&user2, &500);
+
+    client.deposit(&user1, &token1, &1000);
+    assert_eq!(client.get_asset_balance(&token1), 1000);
+    assert_eq!(client.get_asset_balance(&token2), 0);
+    assert_eq!(client.balance(&user1), 1000);
+    assert_eq!(client.total_shares(), 1000);
+    assert_eq!(client.total_assets(), 1000);
+
+    client.deposit(&user2, &token2, &500);
+    assert_eq!(client.get_asset_balance(&token1), 1000);
+    assert_eq!(client.get_asset_balance(&token2), 500);
+    assert_eq!(client.balance(&user2), 500);
+    assert_eq!(client.total_shares(), 1500);
+    assert_eq!(client.total_assets(), 1500);
+
+    assert_eq!(token_client1.balance(&contract_id), 1000);
+    assert_eq!(token_client2.balance(&contract_id), 500);
+}
+
+#[test]
+fn test_multi_asset_share_price_after_mixed_deposits() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token1, stellar_asset_client1, _) = create_token_contract(&env, &token_admin);
+    let (token2, stellar_asset_client2, _) = create_token_contract(&env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin, &token1, &oracle, &treasury, &0u32);
+    client.add_accepted_asset(&token2);
+
+    stellar_asset_client1.mint(&user, &2000);
+    stellar_asset_client2.mint(&user, &1000);
+    client.deposit(&user, &token1, &2000);
+    client.deposit(&user, &token2, &1000);
+
+    assert_eq!(client.total_assets(), 3000);
+    assert_eq!(client.total_shares(), 3000);
+
+    let user2 = Address::generate(&env);
+    stellar_asset_client1.mint(&user2, &300);
+    client.deposit(&user2, &token1, &300);
+
+    assert_eq!(client.balance(&user2), 300);
+    assert_eq!(client.total_shares(), 3300);
+    assert_eq!(client.total_assets(), 3300);
+    assert_eq!(client.get_asset_balance(&token1), 2300);
+    assert_eq!(client.get_asset_balance(&token2), 1000);
 }
