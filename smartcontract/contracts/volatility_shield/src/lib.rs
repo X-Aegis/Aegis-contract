@@ -70,6 +70,12 @@ pub enum DataKey {
     MaxStrategies,
     AcceptedAssets,
     AssetBalance(Address),
+    /// Withdraw request queue: WithdrawRequest(id) stores individual requests
+    WithdrawRequest(u64),
+    /// Counter for next withdraw request ID
+    NextWithdrawRequestId,
+    /// Set of pending withdraw request IDs (for enumeration)
+    WithdrawQueueIds,
 }
 
 #[contracttype]
@@ -90,6 +96,17 @@ pub struct Proposal {
     pub expiration: u64,
     pub executed: bool,
     pub data: Vec<soroban_sdk::Val>, // Packed parameters for the action
+}
+
+/// Represents a queued withdrawal request.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawRequest {
+    pub id: u64,
+    pub user: Address,
+    pub shares: i128,
+    pub requested_at: u64,
+    pub processed: bool,
 }
 
 // ─────────────────────────────────────────────
@@ -139,7 +156,21 @@ pub struct VolatilityShield;
 #[contractimpl]
 impl VolatilityShield {
     // ── Initialization ────────────────────────
-    /// Must be called once. Stores roles and configuration.
+    /// Initializes the vault contract with core roles and configuration.
+    ///
+    /// # Arguments
+    /// * `admin` - The admin address with control over deposits, withdrawals, and contract upgrades.
+    /// * `asset` - The primary stablecoin token address for deposits/withdrawals.
+    /// * `oracle` - The oracle address authorized to trigger rebalancing.
+    /// * `treasury` - The address that receives withdrawal fees.
+    /// * `fee_percentage` - Withdrawal fee in basis points (e.g., 250 = 2.5%).
+    ///
+    /// # Panics
+    /// If called more than once (AlreadyInitialized error).
+    ///
+    /// # Storage
+    /// Initializes instance storage with admin, asset, oracle, treasury, strategies vector,
+    /// fee percentage, accepted assets list (starting with primary asset), and version (1).
     pub fn init(
         env: Env,
         admin: Address,
@@ -192,9 +223,23 @@ impl VolatilityShield {
     }
 
     // ── Upgrade & Migration ───────────────────
-    /// Replace the contract WASM while preserving all storage.
-    /// Only the admin may call this. After the WASM swap the caller must
-    /// invoke `migrate` to advance the schema to the new version.
+    /// Replaces the contract code (WASM) while preserving all storage state.
+    ///
+    /// # Arguments
+    /// * `new_wasm_hash` - SHA-256 hash of the new contract WASM to install.
+    ///
+    /// # Effects
+    /// - Updates the running contract code.
+    /// - All storage (admin, assets, strategies, balances, etc.) is preserved.
+    /// - After upgrade, call `migrate(version + 1)` if the new code requires schema updates.
+    /// - Emits Upgrade event.
+    ///
+    /// # Important
+    /// This is a CRITICAL operation. New WASM must be thoroughly tested before deployment.
+    /// Incorrect WASM can permanently freeze the contract or corrupt state.
+    ///
+    /// # Authorization
+    /// Requires `admin.require_auth()` — only admin can upgrade.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         let admin = Self::get_admin(&env);
         admin.require_auth();
@@ -205,14 +250,26 @@ impl VolatilityShield {
         );
     }
 
-    /// Advance the on-chain schema from its current version to `new_version`.
-    /// Each arm performs the data transformations needed for that step.
-    /// Migrations are strictly sequential: v1→v2, v2→v3, etc.
+    /// Advances the storage schema from its current version to the next sequential version.
     ///
-    /// New fields introduced per version:
-    ///   v2 – `DataKey::MaxStrategies` (u32, 0 = uncapped) initialised to 0
-    ///         for existing deployments that predate the cap.
-    ///         `DataKey::AcceptedAssets` backfilled from the primary asset.
+    /// # Arguments
+    /// * `new_version` - Target schema version (must equal current_version + 1).
+    ///
+    /// # Effects
+    /// - Performs data transformations required by the new version:
+    ///   - v1→v2: Initializes `MaxStrategies` cap (0 = uncapped) and backfills `AcceptedAssets` list.
+    /// - Updates `Version` key to new_version on success.
+    /// - Emits Migrate event with (old_version, new_version).
+    ///
+    /// # Errors
+    /// - Returns InvalidMigrationVersion if new_version != current_version + 1.
+    ///
+    /// # Important
+    /// Migrations are strictly sequential and cannot be skipped. If current version is v1 and
+    /// you want v3, call migrate(2) then migrate(3). Each migration must complete successfully.
+    ///
+    /// # Authorization
+    /// Requires `admin.require_auth()` — only admin can perform migrations.
     pub fn migrate(env: Env, new_version: u32) -> Result<(), Error> {
         let admin = Self::get_admin(&env);
         admin.require_auth();
@@ -293,12 +350,27 @@ impl VolatilityShield {
         Ok(())
     }
 
-    /// Set up multisig guardians and threshold.
+    /// Configures multisig governance with guardians and approval threshold.
+    ///
+    /// # Arguments
+    /// * `guardians` - Vector of guardian addresses authorized to propose and approve actions.
+    /// * `threshold` - Number of guardian signatures required to execute proposals (must be <= guardians.len()).
+    ///
+    /// # Effects
+    /// - Stores guardians list and threshold in instance storage.
+    /// - When threshold > 0, critical functions (set_paused, add_strategy, rebalance) require multisig proposal.
+    /// - Enables `propose_multisig_action` and `approve_multisig_action` entry points.
+    ///
+    /// # Errors
+    /// - Panics if guardians.len() < threshold (invalid configuration).
+    ///
+    /// # Authorization
+    /// Requires `admin.require_auth()` — only admin can initialize multisig.
     pub fn init_multisig(env: Env, guardians: Vec<Address>, threshold: u32) {
         let admin = Self::get_admin(&env);
         admin.require_auth();
 
-        if guardians.len() < threshold as u32 {
+        if guardians.len() < threshold {
             panic!("Guardians count must be >= threshold");
         }
 
@@ -308,6 +380,30 @@ impl VolatilityShield {
             .set(&DataKey::Threshold, &threshold);
     }
 
+    /// Creates a new governance proposal requiring guardian signatures.
+    ///
+    /// # Arguments
+    /// * `creator` - Guardian address proposing the action (must be authorized and in guardians list).
+    /// * `action_type` - Type of action (SetPaused, AddStrategy, or Rebalance).
+    /// * `description` - Human-readable description of the proposal.
+    /// * `data` - Packed Vec<Val> containing action-specific parameters:
+    ///   - SetPaused: [bool] — pause state
+    ///   - AddStrategy: [Address] — strategy address
+    ///   - Rebalance: [Map<Address, i128>] — allocations map
+    ///
+    /// # Returns
+    /// Proposal ID (u64) for use in `approve_multisig_action`.
+    ///
+    /// # Effects
+    /// - Stores proposal in persistent storage with 7-day expiration.
+    /// - Increments and returns next proposal ID.
+    /// - Emits Proposal event.
+    ///
+    /// # Errors
+    /// - Panics if creator is not a guardian.
+    ///
+    /// # Authorization
+    /// Requires `creator.require_auth()` — proposer must cryptographically sign.
     pub fn propose_multisig_action(
         env: Env,
         creator: Address,
@@ -345,6 +441,28 @@ impl VolatilityShield {
         id
     }
 
+    /// Votes to approve a proposal; executes when threshold signatures collected.
+    ///
+    /// # Arguments
+    /// * `guardian` - Guardian address voting (must be authorized and in guardians list).
+    /// * `proposal_id` - ID of the proposal to approve.
+    ///
+    /// # Effects
+    /// - Records guardian's signature on the proposal.
+    /// - Executes proposal action if signatures.len() >= threshold:
+    ///   - SetPaused: Sets vault pause state.
+    ///   - AddStrategy: Adds strategy to vault's strategy list.
+    ///   - Rebalance: Rebalances funds per allocations map.
+    /// - Marks proposal as executed; emits Approve and Execute events.
+    ///
+    /// # Errors
+    /// - Panics if guardian is not in guardians list.
+    /// - Panics if proposal already executed.
+    /// - Panics if proposal has expired (> 7 days old).
+    /// - Panics if guardian already signed this proposal.
+    ///
+    /// # Authorization
+    /// Requires `guardian.require_auth()` — guardian must cryptographically sign.
     pub fn approve_multisig_action(env: Env, guardian: Address, proposal_id: u64) {
         guardian.require_auth();
 
@@ -568,6 +686,30 @@ impl VolatilityShield {
     }
 
     // ── Deposit ───────────────────────────────
+    /// Deposits accepted stablecoin assets into the vault and mints vault shares.
+    ///
+    /// # Arguments
+    /// * `from` - The user address depositing funds (must authorize via require_auth).
+    /// * `asset` - The stablecoin address to deposit (must be in accepted assets whitelist).
+    /// * `amount` - The quantity of assets to deposit in native decimals (must be > 0).
+    ///
+    /// # Effects
+    /// - Transfers `amount` tokens from `from` to vault.
+    /// - Mints shares: `shares = amount * total_shares / total_assets` (or `amount` if vault is empty).
+    /// - Updates per-user cumulative deposit tracker.
+    /// - Enforces per-user and global deposit caps if configured.
+    /// - Emits Deposit event with amount.
+    ///
+    /// # Errors
+    /// - Panics if contract is paused.
+    /// - Panics if amount <= 0 (NegativeAmount).
+    /// - Panics if asset not in accepted assets list.
+    /// - Panics if deposit exceeds per-user cap (DepositCapExceeded).
+    /// - Panics if deposit exceeds global cap (GlobalCapExceeded).
+    /// - Panics if migration is required (MigrationRequired).
+    ///
+    /// # Authorization
+    /// Requires `from.require_auth()` — user must cryptographically sign the transaction.
     pub fn deposit(env: Env, from: Address, asset: Address, amount: i128) {
         Self::assert_min_version(&env, CURRENT_VERSION).expect("migration required");
         Self::assert_not_paused(&env);
@@ -665,6 +807,30 @@ impl VolatilityShield {
     }
 
     // ── Withdraw ──────────────────────────────
+    /// Redeems vault shares and withdraws underlying assets minus fees.
+    ///
+    /// # Arguments
+    /// * `from` - The user address redeeming shares (must authorize via require_auth).
+    /// * `shares` - The quantity of vault shares to burn (must be > 0 and <= user's balance).
+    ///
+    /// # Effects
+    /// - Burns `shares` from user's balance.
+    /// - Calculates assets: `assets = shares * total_assets / total_shares`.
+    /// - Deducts withdrawal fee: `net_assets = assets * (10000 - fee_pct) / 10000`.
+    /// - Transfers net_assets to user; transfers fee to treasury if fee > 0.
+    /// - Updates total shares and total assets.
+    /// - Enforces per-transaction withdrawal cap if configured.
+    /// - Emits Withdraw event with share amount.
+    ///
+    /// # Errors
+    /// - Panics if contract is paused.
+    /// - Panics if shares <= 0 (invalid amount).
+    /// - Panics if shares > user's balance (InsufficientBalance).
+    /// - Panics if calculated assets exceed per-tx cap (WithdrawCapExceeded).
+    /// - Panics if migration is required (MigrationRequired).
+    ///
+    /// # Authorization
+    /// Requires `from.require_auth()` — user must cryptographically sign the transaction.
     pub fn withdraw(env: Env, from: Address, shares: i128) {
         Self::assert_min_version(&env, CURRENT_VERSION).expect("migration required");
         Self::assert_not_paused(&env);
@@ -731,9 +897,293 @@ impl VolatilityShield {
             .publish((symbol_short!("Withdraw"), from.clone()), shares);
     }
 
+    // ── Withdraw Queue Management ─────────────
+    /// Queues a withdrawal request for batch processing.
+    ///
+    /// # Arguments
+    /// * `from` - User address requesting withdrawal (must authorize via require_auth).
+    /// * `shares` - Amount of vault shares to withdraw (must be > 0 and <= user's balance).
+    ///
+    /// # Effects
+    /// - Creates a pending WithdrawRequest in storage.
+    /// - Shares remain in user's balance until processed.
+    /// - User can cancel the request before it's processed.
+    /// - Emits WithdrawQueued event with request ID.
+    ///
+    /// # Returns
+    /// Request ID (u64) for use in `cancel_withdraw()`.
+    ///
+    /// # Errors
+    /// - Panics if shares <= 0.
+    /// - Panics if shares > user's balance.
+    /// - Panics if contract is paused.
+    ///
+    /// # Authorization
+    /// Requires `from.require_auth()` — user must cryptographically sign.
+    pub fn queue_withdraw(env: Env, from: Address, shares: i128) -> u64 {
+        Self::assert_not_paused(&env);
+
+        if shares <= 0 {
+            panic!("shares to withdraw must be positive");
+        }
+        from.require_auth();
+
+        let balance_key = DataKey::Balance(from.clone());
+        let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+
+        if current_balance < shares {
+            panic!("insufficient shares for withdrawal");
+        }
+
+        let id = Self::get_next_withdraw_request_id(&env);
+        let request = WithdrawRequest {
+            id,
+            user: from.clone(),
+            shares,
+            requested_at: env.ledger().timestamp(),
+            processed: false,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::WithdrawRequest(id), &request);
+
+        let mut queue_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::WithdrawQueueIds)
+            .unwrap_or(Vec::new(&env));
+        queue_ids.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawQueueIds, &queue_ids);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::NextWithdrawRequestId, &(id + 1));
+
+        env.events().publish(
+            (symbol_short!("WithdrawQ"), from.clone(), id),
+            shares,
+        );
+
+        id
+    }
+
+    /// Processes all queued withdrawal requests (admin/keeper only).
+    ///
+    /// # Effects
+    /// - Iterates through all pending WithdrawRequest entries.
+    /// - For each request:
+    ///   - Converts shares to assets.
+    ///   - Deducts fees.
+    ///   - Transfers net assets to user.
+    ///   - Transfers fee to treasury.
+    ///   - Marks request as processed.
+    /// - Updates total shares and total assets.
+    /// - Removes processed requests from queue.
+    /// - Emits WithdrawProcessed event for each request.
+    ///
+    /// # Errors
+    /// - Panics if not authorized (admin only).
+    /// - Panics if contract is paused.
+    ///
+    /// # Authorization
+    /// Requires `admin.require_auth()` — only admin can process the queue.
+    pub fn process_withdraw_queue(env: Env) {
+        Self::assert_not_paused(&env);
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+
+        let queue_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::WithdrawQueueIds)
+            .unwrap_or(Vec::new(&env));
+
+        if queue_ids.is_empty() {
+            env.events()
+                .publish((symbol_short!("QueueEmpt"),), true);
+            return;
+        }
+
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .expect("Token not initialized");
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract_addr = env.current_contract_address();
+        let treasury_addr = Self::treasury(&env);
+
+        let mut total_shares_burned: i128 = 0;
+        let mut total_assets_withdrawn: i128 = 0;
+        let mut processed_ids: Vec<u64> = Vec::new(&env);
+
+        for request_id in queue_ids.iter() {
+            if let Some(mut request) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, WithdrawRequest>(&DataKey::WithdrawRequest(request_id))
+            {
+                if request.processed {
+                    continue;
+                }
+
+                let shares = request.shares;
+                let assets_to_withdraw = Self::convert_to_assets(env.clone(), shares);
+                let (net_assets, fee) = Self::take_fees(&env, assets_to_withdraw);
+
+                // Transfer net assets to user
+                token_client.transfer(&contract_addr, &request.user, &net_assets);
+
+                // Transfer fee to treasury if any
+                if fee > 0 {
+                    token_client.transfer(&contract_addr, &treasury_addr, &fee);
+                }
+
+                // Update user's balance
+                let balance_key = DataKey::Balance(request.user.clone());
+                let current_balance: i128 =
+                    env.storage().persistent().get(&balance_key).unwrap_or(0);
+                env.storage().persistent().set(
+                    &balance_key,
+                    &(current_balance.checked_sub(shares).unwrap()),
+                );
+
+                // Mark as processed
+                request.processed = true;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::WithdrawRequest(request_id), &request);
+
+                total_shares_burned = total_shares_burned.checked_add(shares).unwrap();
+                total_assets_withdrawn = total_assets_withdrawn
+                    .checked_add(assets_to_withdraw)
+                    .unwrap();
+
+                processed_ids.push_back(request_id);
+
+                env.events().publish(
+                    (symbol_short!("WthdrwPrc"), request.user.clone(), request_id),
+                    (shares, net_assets, fee),
+                );
+            }
+        }
+
+        // Update total shares and assets
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+        Self::set_total_shares(
+            env.clone(),
+            total_shares.checked_sub(total_shares_burned).unwrap(),
+        );
+        Self::set_total_assets(
+            env.clone(),
+            total_assets.checked_sub(total_assets_withdrawn).unwrap(),
+        );
+
+        // Remove processed requests from queue
+        let mut new_queue: Vec<u64> = Vec::new(&env);
+        for id in queue_ids.iter() {
+            if !processed_ids.contains(id.clone()) {
+                new_queue.push_back(id);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawQueueIds, &new_queue);
+
+        env.events().publish(
+            (symbol_short!("QueueProc"),),
+            (processed_ids.len(), total_shares_burned, total_assets_withdrawn),
+        );
+    }
+
+    /// Cancels a pending withdrawal request.
+    ///
+    /// # Arguments
+    /// * `from` - User address canceling the request (must authorize via require_auth).
+    /// * `request_id` - ID of the WithdrawRequest to cancel.
+    ///
+    /// # Effects
+    /// - Removes the WithdrawRequest from storage.
+    /// - Removes request ID from the queue.
+    /// - Shares remain in user's balance (not withdrawn).
+    /// - Emits WithdrawCancelled event.
+    ///
+    /// # Errors
+    /// - Panics if request not found.
+    /// - Panics if request already processed.
+    /// - Panics if user is not the request creator.
+    ///
+    /// # Authorization
+    /// Requires `from.require_auth()` — user must cryptographically sign.
+    pub fn cancel_withdraw(env: Env, from: Address, request_id: u64) {
+        from.require_auth();
+
+        let request = Self::get_withdraw_request(&env, request_id);
+
+        if request.user != from {
+            panic!("Only request creator can cancel");
+        }
+
+        if request.processed {
+            panic!("Cannot cancel processed request");
+        }
+
+        // Remove from storage
+        env.storage().persistent().remove(&DataKey::WithdrawRequest(request_id));
+
+        // Remove from queue
+        let queue_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::WithdrawQueueIds)
+            .unwrap_or(Vec::new(&env));
+
+        let mut new_queue: Vec<u64> = Vec::new(&env);
+        for id in queue_ids.iter() {
+            if id != request_id {
+                new_queue.push_back(id);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawQueueIds, &new_queue);
+
+        env.events().publish(
+            (symbol_short!("WthdrwCan"), from.clone(), request_id),
+            request.shares,
+        );
+    }
+
     // ── Rebalance ─────────────────────────────
-    /// Move funds between strategies according to `allocations`.
-    /// Accepts slippage tolerance in basis points (1 bps = 0.01%).
+    /// Reallocates funds between yield strategies to match target allocations.
+    ///
+    /// # Arguments
+    /// * `allocations` - Map of strategy addresses to target asset amounts.
+    /// * `max_slippage_bps` - Maximum acceptable slippage in basis points (100 = 1%).
+    ///
+    /// # Effects
+    /// - Deposits or withdraws from each strategy to match target allocations.
+    /// - Checks actual post-rebalance balance against expected; panics if slippage exceeds limit.
+    /// - Updates internal strategy balances via cross-contract calls.
+    /// - Emits Slippage event if tolerance exceeded (before panicking).
+    ///
+    /// # Errors
+    /// - Panics if not authorized (admin or oracle).
+    /// - Panics if multisig governance enabled (threshold > 0); must use multisig proposal path.
+    /// - Panics if slippage exceeds max_slippage_bps for any strategy (SlippageExceeded).
+    /// - Panics if migration is required (MigrationRequired).
+    ///
+    /// # Authorization
+    /// Requires `admin.require_auth()` or `oracle.require_auth()` — only admin or oracle can rebalance.
+    /// If multisig is enabled (threshold > 0), this function rejects; use `propose_multisig_action` instead.
+    ///
+    /// # Note
+    /// Slippage is computed post-transaction. If strategies mutate balances unexpectedly
+    /// (e.g., rounding or yield accumulation), slippage may not reflect the full impact.
     pub fn rebalance(env: Env, allocations: Map<Address, i128>, max_slippage_bps: u32) {
         Self::assert_min_version(&env, CURRENT_VERSION).expect("migration required");
         let admin = Self::get_admin(&env);
@@ -828,6 +1278,24 @@ impl VolatilityShield {
     }
 
     // ── Strategy Management ───────────────────
+    /// Registers a new yield strategy contract with the vault.
+    ///
+    /// # Arguments
+    /// * `strategy` - Address of the strategy contract to add.
+    ///
+    /// # Effects
+    /// - Adds strategy to vault's strategy list (if not already present).
+    /// - Strategy must implement deposit(amount), withdraw(amount), and balance() callables.
+    /// - Emits Strategy event.
+    ///
+    /// # Errors
+    /// - Returns AlreadyInitialized if strategy is already registered.
+    /// - Panics if not authorized (admin only; or multisig proposal if threshold > 0).
+    /// - Panics if multisig governance enabled; must use `propose_multisig_action` instead.
+    ///
+    /// # Authorization
+    /// Requires `admin.require_auth()` — only admin can add strategies.
+    /// If multisig is enabled (threshold > 0), this function rejects; use multisig proposal path.
     pub fn add_strategy(env: Env, strategy: Address) -> Result<(), Error> {
         let admin = Self::get_admin(&env);
         admin.require_auth();
@@ -858,6 +1326,23 @@ impl VolatilityShield {
         Ok(())
     }
 
+    /// Collects accrued yield from all registered strategies and updates vault accounting.
+    ///
+    /// # Effects
+    /// - Calls `balance()` on each strategy to query accrued yield.
+    /// - Sums total yield across all strategies.
+    /// - Increments `total_assets` by total_yield if yield > 0.
+    /// - Does NOT transfer tokens (assumes yield is already in vault or strategies).
+    /// - Emits harvest event with total_yield.
+    ///
+    /// # Returns
+    /// Total yield amount collected (i128).
+    ///
+    /// # Errors
+    /// - Returns NoStrategies if no strategies are registered.
+    ///
+    /// # Authorization
+    /// Requires `admin.require_auth()` — only admin can harvest.
     pub fn harvest(env: Env) -> Result<i128, Error> {
         let admin = Self::get_admin(&env);
         admin.require_auth();
@@ -991,10 +1476,10 @@ impl VolatilityShield {
         let mut guardians = Self::get_guardians(&env);
         if let Some(index) = guardians.first_index_of(guardian.clone()) {
             guardians.remove(index);
-            
+
             // Check threshold validity
             let threshold = Self::get_threshold(&env);
-            if (guardians.len() as u32) < threshold {
+            if guardians.len() < threshold {
                 panic!("Cannot remove guardian: would break threshold");
             }
 
@@ -1014,7 +1499,7 @@ impl VolatilityShield {
         admin.require_auth();
 
         let guardians = Self::get_guardians(&env);
-        if guardians.len() < threshold as u32 {
+        if guardians.len() < threshold {
             panic!("Threshold cannot be greater than guardians count");
         }
 
@@ -1091,6 +1576,53 @@ impl VolatilityShield {
             .unwrap_or(0)
     }
 
+    /// Retrieves a specific withdraw request by ID.
+    pub fn get_withdraw_request(env: &Env, request_id: u64) -> WithdrawRequest {
+        env.storage()
+            .persistent()
+            .get(&DataKey::WithdrawRequest(request_id))
+            .expect("Withdraw request not found")
+    }
+
+    /// Returns the next withdraw request ID to be assigned.
+    pub fn get_next_withdraw_request_id(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::NextWithdrawRequestId)
+            .unwrap_or(0)
+    }
+
+    /// Returns all pending withdraw request IDs in the queue.
+    pub fn get_withdraw_queue(env: Env) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::WithdrawQueueIds)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns all pending withdraw requests for a specific user.
+    pub fn get_user_pending_withdrawals(env: Env, user: Address) -> Vec<WithdrawRequest> {
+        let queue_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::WithdrawQueueIds)
+            .unwrap_or(Vec::new(&env));
+
+        let mut user_requests = Vec::new(&env);
+        for request_id in queue_ids.iter() {
+            if let Some(request) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, WithdrawRequest>(&DataKey::WithdrawRequest(request_id))
+            {
+                if request.user == user && !request.processed {
+                    user_requests.push_back(request);
+                }
+            }
+        }
+        user_requests
+    }
+
     // ── Internal Helpers ──────────────────────
     fn assert_not_paused(env: &Env) {
         let is_paused: bool = env
@@ -1104,7 +1636,7 @@ impl VolatilityShield {
     }
 
     pub fn take_fees(env: &Env, amount: i128) -> (i128, i128) {
-        let fee_pct = Self::fee_percentage(&env);
+        let fee_pct = Self::fee_percentage(env);
         if fee_pct == 0 {
             return (amount, 0);
         }

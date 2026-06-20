@@ -1623,3 +1623,356 @@ fn test_multi_asset_share_price_after_mixed_deposits() {
     assert_eq!(client.get_asset_balance(&token1), 2300);
     assert_eq!(client.get_asset_balance(&token2), 1000);
 }
+
+// ── Withdraw Queue Tests ──────────────────────
+
+#[test]
+fn test_queue_withdraw_basic() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &250u32);
+
+    // Mint and deposit
+    stellar_asset_client.mint(&user, &1000);
+    client.deposit(&user, &token_id, &1000);
+
+    // Queue withdrawal
+    let request_id = client.queue_withdraw(&user, &500);
+
+    // Verify request was queued
+    let queue_ids = client.get_withdraw_queue();
+    assert_eq!(queue_ids.len(), 1);
+    assert_eq!(queue_ids.get(0).unwrap(), request_id);
+
+    // Verify request details
+    let request = client.get_withdraw_request(&request_id);
+    assert_eq!(request.user, user);
+    assert_eq!(request.shares, 500);
+    assert_eq!(request.processed, false);
+
+    // Verify user balance unchanged (not yet withdrawn)
+    assert_eq!(client.balance(&user), 1000);
+}
+
+#[test]
+#[should_panic(expected = "insufficient shares")]
+fn test_queue_withdraw_insufficient_shares() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    stellar_asset_client.mint(&user, &1000);
+    client.deposit(&user, &token_id, &1000);
+
+    // Try to queue more than balance
+    client.queue_withdraw(&user, &1500);
+}
+
+#[test]
+fn test_cancel_withdraw() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    stellar_asset_client.mint(&user, &1000);
+    client.deposit(&user, &token_id, &1000);
+
+    // Queue withdrawal
+    let request_id = client.queue_withdraw(&user, &500);
+    assert_eq!(client.get_withdraw_queue().len(), 1);
+
+    // Cancel withdrawal
+    client.cancel_withdraw(&user, &request_id);
+
+    // Verify request removed from queue
+    assert_eq!(client.get_withdraw_queue().len(), 0);
+
+    // Verify user balance still intact
+    assert_eq!(client.balance(&user), 1000);
+}
+
+#[test]
+#[should_panic(expected = "Only request creator can cancel")]
+fn test_cancel_withdraw_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    stellar_asset_client.mint(&user1, &1000);
+    client.deposit(&user1, &token_id, &1000);
+
+    let request_id = client.queue_withdraw(&user1, &500);
+
+    // Try to cancel from different user
+    client.cancel_withdraw(&user2, &request_id);
+}
+
+#[test]
+fn test_process_withdraw_queue_single_request() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &250u32); // 2.5% fee
+
+    stellar_asset_client.mint(&user, &1000);
+    client.deposit(&user, &token_id, &1000);
+
+    let initial_balance = client.balance(&user);
+    assert_eq!(initial_balance, 1000);
+
+    // Queue withdrawal of 500 shares
+    client.queue_withdraw(&user, &500);
+
+    // Process queue
+    client.process_withdraw_queue();
+
+    // Verify user balance reduced
+    assert_eq!(client.balance(&user), 500);
+
+    // Verify total assets reduced (500 shares + 2.5% fee = ~512.5 assets)
+    let final_assets = client.total_assets();
+    assert!(final_assets <= 500); // Assets minus fee
+
+    // Verify queue is empty
+    assert_eq!(client.get_withdraw_queue().len(), 0);
+}
+
+#[test]
+fn test_process_withdraw_queue_multiple_requests() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    // Setup users with deposits
+    stellar_asset_client.mint(&user1, &1000);
+    stellar_asset_client.mint(&user2, &1000);
+
+    client.deposit(&user1, &token_id, &1000);
+    client.deposit(&user2, &token_id, &1000);
+
+    assert_eq!(client.total_shares(), 2000);
+
+    // Queue withdrawals from both users
+    client.queue_withdraw(&user1, &400);
+    client.queue_withdraw(&user2, &600);
+
+    assert_eq!(client.get_withdraw_queue().len(), 2);
+
+    // Process queue
+    client.process_withdraw_queue();
+
+    // Verify all requests processed
+    assert_eq!(client.get_withdraw_queue().len(), 0);
+
+    // Verify balances updated
+    assert_eq!(client.balance(&user1), 600);
+    assert_eq!(client.balance(&user2), 400);
+
+    // Verify total shares reduced
+    assert_eq!(client.total_shares(), 1000);
+}
+
+#[test]
+#[should_panic(expected = "Cannot cancel processed request")]
+fn test_cancel_processed_withdraw_fails() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    stellar_asset_client.mint(&user, &1000);
+    client.deposit(&user, &token_id, &1000);
+
+    let request_id = client.queue_withdraw(&user, &500);
+
+    // Process queue
+    client.process_withdraw_queue();
+
+    // Try to cancel processed request
+    client.cancel_withdraw(&user, &request_id);
+}
+
+#[test]
+fn test_withdraw_queue_full_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &500u32); // 5% fee
+
+    // Setup deposits
+    for user in [&user1, &user2, &user3] {
+        stellar_asset_client.mint(user, &1000);
+        client.deposit(user, &token_id, &1000);
+    }
+
+    assert_eq!(client.total_shares(), 3000);
+    assert_eq!(client.balance(&user1), 1000);
+    assert_eq!(client.balance(&user2), 1000);
+    assert_eq!(client.balance(&user3), 1000);
+
+    // Step 1: user1 queues withdrawal
+    let _request_id1 = client.queue_withdraw(&user1, &300);
+
+    // Step 2: user2 queues withdrawal
+    let _request_id2 = client.queue_withdraw(&user2, &500);
+
+    // Step 3: user3 queues withdrawal
+    let request_id3 = client.queue_withdraw(&user3, &200);
+
+    // Verify 3 requests in queue
+    assert_eq!(client.get_withdraw_queue().len(), 3);
+
+    // Step 4: user3 cancels their request
+    client.cancel_withdraw(&user3, &request_id3);
+
+    // Verify 2 requests remain
+    assert_eq!(client.get_withdraw_queue().len(), 2);
+    assert_eq!(client.balance(&user3), 1000); // user3 balance unchanged
+
+    // Step 5: Admin processes queue
+    client.process_withdraw_queue();
+
+    // Verify no requests remain
+    assert_eq!(client.get_withdraw_queue().len(), 0);
+
+    // Verify user1 and user2 withdrawals processed
+    assert_eq!(client.balance(&user1), 700); // 1000 - 300
+    assert_eq!(client.balance(&user2), 500); // 1000 - 500
+    assert_eq!(client.balance(&user3), 1000); // unchanged (cancelled)
+
+    // Verify total shares reduced by processed amounts
+    assert_eq!(client.total_shares(), 2200); // 3000 - 300 - 500
+}
+
+#[test]
+fn test_get_user_pending_withdrawals() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let token_admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    // Setup deposits
+    stellar_asset_client.mint(&user1, &2000);
+    stellar_asset_client.mint(&user2, &1000);
+
+    client.deposit(&user1, &token_id, &2000);
+    client.deposit(&user2, &token_id, &1000);
+
+    // user1 queues 2 withdrawals
+    client.queue_withdraw(&user1, &300);
+    client.queue_withdraw(&user1, &500);
+
+    // user2 queues 1 withdrawal
+    client.queue_withdraw(&user2, &200);
+
+    // Verify user1 has 2 pending
+    let user1_pending = client.get_user_pending_withdrawals(&user1);
+    assert_eq!(user1_pending.len(), 2);
+    assert_eq!(user1_pending.get(0).unwrap().shares, 300);
+    assert_eq!(user1_pending.get(1).unwrap().shares, 500);
+
+    // Verify user2 has 1 pending
+    let user2_pending = client.get_user_pending_withdrawals(&user2);
+    assert_eq!(user2_pending.len(), 1);
+    assert_eq!(user2_pending.get(0).unwrap().shares, 200);
+}
