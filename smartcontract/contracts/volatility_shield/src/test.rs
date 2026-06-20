@@ -1,6 +1,6 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, Map};
+use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, Map};
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient;
 
@@ -204,5 +204,36 @@ fn test_rebalance_admin_auth_accepted() {
     client.init(&admin, &asset, &oracle, &treasury, &0u32);
 
     let allocations: Map<Address, i128> = Map::new(&env);
-    client.rebalance(&allocations);
+    client.set_oracle_data(&oracle, &allocations, &1000);
+    env.ledger().with_mut(|li| {
+        li.timestamp = 2000;
+    });
+    client.rebalance(&admin);
+}
+
+#[test]
+#[should_panic(expected = "Stale oracle data")]
+fn test_oracle_staleness_rejected() {
+    let env         = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client      = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin  = Address::generate(&env);
+    let asset  = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let allocations: Map<Address, i128> = Map::new(&env);
+    
+    client.set_oracle_data(&oracle, &allocations, &1000);
+    
+    env.ledger().with_mut(|li| {
+        li.timestamp = 5000;
+    });
+
+    client.rebalance(&admin);
 }
