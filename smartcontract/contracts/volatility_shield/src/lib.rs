@@ -33,6 +33,9 @@ pub enum DataKey {
     FeePercentage,
     Token,
     Balance(Address),
+    OracleLastUpdate,
+    MaxStaleness,
+    OracleAllocations,
 }
 
 // ─────────────────────────────────────────────
@@ -162,13 +165,50 @@ impl VolatilityShield {
         env.events().publish((symbol_short!("Withdraw"), from.clone()), shares);
     }
 
+    // ── Oracle Data ──────────────────────────────
+    pub fn set_max_staleness(env: Env, caller: Address, max_staleness: u64) {
+        caller.require_auth();
+        let admin = Self::get_admin(&env);
+        if caller != admin { panic!("Unauthorized"); }
+        env.storage().instance().set(&DataKey::MaxStaleness, &max_staleness);
+    }
+
+    pub fn set_oracle_data(env: Env, caller: Address, allocations: Map<Address, i128>, timestamp: u64) {
+        caller.require_auth();
+        let oracle = Self::get_oracle(&env);
+        if caller != oracle { panic!("Unauthorized"); }
+
+        let current_time = env.ledger().timestamp();
+        let max_staleness: u64 = env.storage().instance().get(&DataKey::MaxStaleness).unwrap_or(3600);
+
+        if current_time > timestamp && current_time - timestamp > max_staleness {
+            env.events().publish((symbol_short!("Oracle"), symbol_short!("Reject")), timestamp);
+            panic!("Stale oracle data");
+        }
+
+        env.storage().instance().set(&DataKey::OracleLastUpdate, &timestamp);
+        env.storage().instance().set(&DataKey::OracleAllocations, &allocations);
+    }
+
     // ── Rebalance ─────────────────────────────
-    /// Move funds between strategies according to `allocations`.
-    pub fn rebalance(env: Env, allocations: Map<Address, i128>) {
+    /// Move funds between strategies according to stored `allocations`.
+    pub fn rebalance(env: Env, caller: Address) {
+        caller.require_auth();
         let admin  = Self::get_admin(&env);
         let oracle = Self::get_oracle(&env);
 
-        Self::require_admin_or_oracle(&env, &admin, &oracle);
+        if caller != admin && caller != oracle { panic!("Unauthorized"); }
+
+        let current_time = env.ledger().timestamp();
+        let last_update: u64 = env.storage().instance().get(&DataKey::OracleLastUpdate).expect("No oracle data");
+        let max_staleness: u64 = env.storage().instance().get(&DataKey::MaxStaleness).unwrap_or(3600);
+        
+        if current_time > last_update && current_time - last_update > max_staleness {
+            env.events().publish((symbol_short!("Oracle"), symbol_short!("Reject")), last_update);
+            panic!("Stale oracle data");
+        }
+
+        let allocations: Map<Address, i128> = env.storage().instance().get(&DataKey::OracleAllocations).expect("No allocations");
 
         let asset_addr   = Self::get_asset(&env);
         let token_client = token::Client::new(&env, &asset_addr);
@@ -309,13 +349,6 @@ impl VolatilityShield {
         env.storage().instance().set(&DataKey::Token, &token);
     }
 
-    fn require_admin_or_oracle(env: &Env, admin: &Address, oracle: &Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
-            admin.require_auth();
-        } else {
-            oracle.require_auth();
-        }
-    }
 }
 
 mod test;
