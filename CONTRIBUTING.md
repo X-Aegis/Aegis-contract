@@ -41,35 +41,6 @@ We follow a strict **Modular Commit** philosophy to ensure history is readable a
 4.  **Test**: Run `cargo test` (contracts).
 5.  **Commit**: Follow the commit guidelines above.
 
-## 🔗 Pull Request Checklist
-
-When opening a PR, follow these steps:
-
-1.  **Link the Issue**: In your PR description, use:
-    - `Closes #26` — when your PR resolves the issue
-    - `Fixes #26` — when your PR fixes a bug
-    - `Resolves #26` — when your PR fully resolves it
-    Example:
-    ```
-    ## Summary
-    - Added detailed event logging for AI analysis
-    
-    Closes #26
-    ```
-
-2.  **Tag Both Issue & PR**: 
-    - On the **issue**: Comment tagging the author (`@username`) to let them know you're working on it
-    - On the **PR**: Tag `@bbkenny` to notify maintainer(s) review is ready
-    Example on issue:
-    > Hey @bbkenny, I've got a PR ready for this. Want to check it out when you get a chance?
-    Example on PR comment:
-    > @bbkenny, PR is ready for review!
-
-3.  **Keep PRs Small**: Only fix what's needed. Don't rewrite entire files or change hundreds of lines when the issue only needs a few lines fixed. Real devs fix the specific problem, not everything.
-
 ## Getting Help
 
 Read the **Integration Guides** located in the `docs/` directory for detailed setup instructions.
-
-### Testing
-When running smart contract tests, snapshot files may be generated in the `test_snapshots/` directory. Please ensure this directory is not committed to version control. It has been added to `.gitignore`.
