@@ -19,14 +19,6 @@ Examples of behavior that contributes to creating a positive environment include
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported by contacting the project team. All complaints will be reviewed and investigated.
 
-## 📋 PR Guidelines
-
-When submitting a pull request:
-
-1.  **Link the Issue**: Use `Closes #`, `Fixes #`, or `Resolves #` in your PR description to auto-close the issue when merged.
-2.  **Tag the Maintainer**: After opening your PR, comment on the issue tagging `@bbkenny` to notify the maintainer(s) that your work is ready for review.
-3.  **Keep Changes Focused**: Only fix what's needed for the issue. Don't change hundreds of lines when a few lines will do. This shows you understand the problem and builds trust.
-
 ## Attribution
 
 This Code of Conduct is adapted from the [Contributor Covenant][homepage], version 2.1.
