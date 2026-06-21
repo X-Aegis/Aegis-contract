@@ -189,6 +189,7 @@ fn test_withdraw_success() {
 }
 
 #[test]
+#[should_panic(expected = "allocation percentages must sum to 10000 BPS")]
 fn test_rebalance_admin_auth_accepted() {
     let env         = Env::default();
     env.mock_all_auths();
@@ -235,5 +236,73 @@ fn test_oracle_staleness_rejected() {
         li.timestamp = 5000;
     });
 
+    client.rebalance(&admin);
+}
+
+#[test]
+#[should_panic(expected = "allocation percentages must sum to 10000 BPS")]
+fn test_rebalance_invalid_sum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let mock_strategy_id = Address::generate(&env);
+    client.add_strategy(&mock_strategy_id);
+
+    let mut allocations: Map<Address, i128> = Map::new(&env);
+    allocations.set(mock_strategy_id, 9999);
+    client.set_oracle_data(&oracle, &allocations, &1000);
+    env.ledger().with_mut(|li| { li.timestamp = 2000; });
+    client.rebalance(&admin);
+}
+
+#[test]
+#[should_panic(expected = "allocation values cannot be negative")]
+fn test_rebalance_negative_allocation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let mock_strategy_id = Address::generate(&env);
+    client.add_strategy(&mock_strategy_id);
+
+    let mut allocations: Map<Address, i128> = Map::new(&env);
+    allocations.set(mock_strategy_id, -100);
+    client.set_oracle_data(&oracle, &allocations, &1000);
+    env.ledger().with_mut(|li| { li.timestamp = 2000; });
+    client.rebalance(&admin);
+}
+
+#[test]
+#[should_panic(expected = "allocation to zero-address or unlisted strategy")]
+fn test_rebalance_unlisted_strategy() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let unlisted_strategy_id = Address::generate(&env);
+
+    let mut allocations: Map<Address, i128> = Map::new(&env);
+    allocations.set(unlisted_strategy_id, 10000);
+    client.set_oracle_data(&oracle, &allocations, &1000);
+    env.ledger().with_mut(|li| { li.timestamp = 2000; });
     client.rebalance(&admin);
 }
