@@ -77,9 +77,8 @@ jobs:
             "Love the changes in '$PR_TITLE'. Spot on! Approved and merging."
           )
 
-          # Pick a random response
-          RANDOM_INDEX=$((RANDOM % ${#RESPONSES[@]}))
-          SELECTED_RESPONSE="${RESPONSES[$RANDOM_INDEX]}"
+          # Pick a random response using shuf
+          SELECTED_RESPONSE=$(shuf -n1 -e "${RESPONSES[@]}")
 
           # 1. Approve the PR with the dynamic comment (This looks like it came from bbkenny!)
           gh pr review "$PR_NUMBER" --approve -b "$SELECTED_RESPONSE"
