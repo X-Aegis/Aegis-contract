@@ -190,6 +190,23 @@ impl VolatilityShield {
         env.storage().instance().set(&DataKey::OracleAllocations, &allocations);
     }
 
+    fn validate_allocations(env: &Env, allocations: &Map<Address, i128>) {
+        let mut total_bps: i128 = 0;
+        let whitelist = Self::get_strategies(env);
+        for (strategy_addr, alloc_bps) in allocations.iter() {
+            if alloc_bps < 0 {
+                panic!("allocation values cannot be negative");
+            }
+            if !whitelist.contains(strategy_addr) {
+                panic!("allocation to zero-address or unlisted strategy");
+            }
+            total_bps += alloc_bps;
+        }
+        if total_bps != 10000 {
+            panic!("allocation percentages must sum to 10000 BPS");
+        }
+    }
+
     // ── Rebalance ─────────────────────────────
     /// Move funds between strategies according to stored `allocations`.
     pub fn rebalance(env: Env, caller: Address) {
@@ -210,11 +227,15 @@ impl VolatilityShield {
 
         let allocations: Map<Address, i128> = env.storage().instance().get(&DataKey::OracleAllocations).expect("No allocations");
 
+        Self::validate_allocations(&env, &allocations);
+
         let asset_addr   = Self::get_asset(&env);
         let token_client = token::Client::new(&env, &asset_addr);
         let vault        = env.current_contract_address();
+        let total_assets = Self::total_assets(&env);
 
-        for (strategy_addr, target_allocation) in allocations.iter() {
+        for (strategy_addr, alloc_bps) in allocations.iter() {
+            let target_allocation = (total_assets * alloc_bps) / 10000;
             let strategy       = StrategyClient::new(&env, strategy_addr.clone());
             let current_balance = strategy.balance();
 
