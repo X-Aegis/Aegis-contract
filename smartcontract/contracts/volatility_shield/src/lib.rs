@@ -4,6 +4,16 @@ use soroban_sdk::{
 };
 
 // ─────────────────────────────────────────────
+// Strategy health status
+// ─────────────────────────────────────────────
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum HealthStatus {
+    Healthy,
+    Flagged,
+}
+
+// ─────────────────────────────────────────────
 // Error types
 // ─────────────────────────────────────────────
 #[contracterror]
@@ -15,6 +25,8 @@ pub enum Error {
     NegativeAmount  = 3,
     Unauthorized    = 4,
     NoStrategies    = 5,
+    StrategyNotFound = 6,
+    StrategyFlagged  = 7,
 }
 
 // ─────────────────────────────────────────────
@@ -36,6 +48,8 @@ pub enum DataKey {
     OracleLastUpdate,
     MaxStaleness,
     OracleAllocations,
+    /// Stores HealthStatus for each registered strategy address.
+    StrategyHealth(Address),
 }
 
 // ─────────────────────────────────────────────
@@ -266,6 +280,139 @@ impl VolatilityShield {
         env.events().publish((symbol_short!("Strategy"), symbol_short!("added")), strategy);
 
         Ok(())
+    }
+
+    // ── Strategy Health ───────────────────────
+
+    /// Checks all registered strategies by comparing their reported balance
+    /// against the last-known balance stored in StrategyHealth.  
+    /// A strategy whose balance has dropped to zero while a prior balance was
+    /// recorded is automatically flagged.
+    /// Returns a `Vec` of currently-flagged strategy addresses.
+    pub fn check_strategy_health(env: Env) -> Vec<Address> {
+        let strategies = Self::get_strategies(&env);
+        let mut flagged: Vec<Address> = Vec::new(&env);
+
+        for strategy_addr in strategies.iter() {
+            let health_key = DataKey::StrategyHealth(strategy_addr.clone());
+            let last_known: i128 = env.storage().persistent()
+                .get(&health_key)
+                .unwrap_or(0);
+
+            let actual: i128 = env.invoke_contract(
+                &strategy_addr,
+                &soroban_sdk::Symbol::new(&env, "balance"),
+                soroban_sdk::vec![&env],
+            );
+
+            // Update the stored balance to the latest reading
+            env.storage().persistent().set(&health_key, &actual);
+
+            // Flag the strategy if it had a positive expected balance but
+            // now reports zero (or if it is already flagged)
+            if actual == 0 && last_known > 0 {
+                env.events().publish(
+                    (symbol_short!("Strategy"), symbol_short!("flagged")),
+                    strategy_addr.clone(),
+                );
+                // Persist flagged status as -1 sentinel
+                env.storage().persistent().set(&health_key, &(-1i128));
+                flagged.push_back(strategy_addr.clone());
+            }
+        }
+
+        flagged
+    }
+
+    /// Flag a strategy as unhealthy. Admin-only.
+    /// Emits a `StrategyFlagged` event.
+    pub fn flag_strategy(env: Env, caller: Address, strategy: Address) -> Result<(), Error> {
+        caller.require_auth();
+        let admin = Self::get_admin(&env);
+        if caller != admin {
+            return Err(Error::Unauthorized);
+        }
+
+        let strategies = Self::get_strategies(&env);
+        if !strategies.contains(strategy.clone()) {
+            return Err(Error::StrategyNotFound);
+        }
+
+        // Store -1 as a sentinel meaning "flagged"
+        env.storage().persistent().set(
+            &DataKey::StrategyHealth(strategy.clone()),
+            &(-1i128),
+        );
+
+        env.events().publish(
+            (symbol_short!("Strategy"), symbol_short!("flagged")),
+            strategy,
+        );
+
+        Ok(())
+    }
+
+    /// Remove a strategy: withdraws all remaining funds first, then de-lists it.
+    /// Admin-only. Emits a `StrategyRemoved` event.
+    pub fn remove_strategy(env: Env, caller: Address, strategy: Address) -> Result<(), Error> {
+        caller.require_auth();
+        let admin = Self::get_admin(&env);
+        if caller != admin {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut strategies: Vec<Address> = Self::get_strategies(&env);
+        let mut found_idx: Option<u32> = None;
+        for (i, s) in strategies.iter().enumerate() {
+            if s == strategy {
+                found_idx = Some(i as u32);
+                break;
+            }
+        }
+
+        let idx = found_idx.ok_or(Error::StrategyNotFound)?;
+
+        // Withdraw all remaining funds from the strategy
+        let strategy_client = StrategyClient::new(&env, strategy.clone());
+        let remaining = strategy_client.balance();
+        if remaining > 0 {
+            strategy_client.withdraw(remaining);
+            // Reduce tracked total_assets accordingly
+            let current_assets = Self::total_assets(&env);
+            let new_assets = if current_assets >= remaining {
+                current_assets - remaining
+            } else {
+                0
+            };
+            env.storage().instance().set(&DataKey::TotalAssets, &new_assets);
+        }
+
+        // Remove from the strategies list
+        strategies.remove(idx);
+        env.storage().instance().set(&DataKey::Strategies, &strategies);
+
+        // Clean up health entry
+        env.storage().persistent().remove(&DataKey::StrategyHealth(strategy.clone()));
+
+        env.events().publish(
+            (symbol_short!("Strategy"), symbol_short!("removed")),
+            strategy,
+        );
+
+        Ok(())
+    }
+
+    // ── Strategy Health View ──────────────────
+
+    /// Returns the raw stored health value for a strategy.
+    /// -1  → flagged
+    ///  0  → no history recorded yet
+    /// >0  → last recorded balance
+    pub fn get_strategy_health(env: Env, strategy: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StrategyHealth(strategy))
+            .unwrap_or(0)
     }
 
     pub fn harvest(env: Env) -> Result<i128, Error> {

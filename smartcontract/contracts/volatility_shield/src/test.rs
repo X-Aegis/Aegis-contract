@@ -4,6 +4,8 @@ use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, Map};
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient;
 
+extern crate mock_strategy;
+
 fn create_token_contract<'a>(env: &Env, admin: &Address) -> (Address, StellarAssetClient<'a>, TokenClient<'a>) {
     let contract_id = env.register_stellar_asset_contract_v2(admin.clone());
     let stellar_asset_client = StellarAssetClient::new(env, &contract_id.address());
@@ -305,4 +307,294 @@ fn test_rebalance_unlisted_strategy() {
     client.set_oracle_data(&oracle, &allocations, &1000);
     env.ledger().with_mut(|li| { li.timestamp = 2000; });
     client.rebalance(&admin);
+}
+
+// ── Strategy Health Tests ─────────────────────────────────────────────────
+
+#[test]
+fn test_flag_strategy_marks_flagged() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let strategy = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.add_strategy(&strategy);
+
+    // Flag the strategy
+    client.flag_strategy(&admin, &strategy);
+
+    // Health value should be -1 (flagged sentinel)
+    assert_eq!(client.get_strategy_health(&strategy), -1i128);
+}
+
+#[test]
+fn test_flag_strategy_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let strategy = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.add_strategy(&strategy);
+
+    client.flag_strategy(&admin, &strategy);
+
+    // Verify at least one event was published (the StrategyFlagged event)
+    let events = env.events().all();
+    assert!(!events.is_empty());
+}
+
+#[test]
+#[should_panic]
+fn test_flag_strategy_not_listed_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // Strategy was never added — should return StrategyNotFound error (panics via unwrap)
+    let unknown_strategy = Address::generate(&env);
+    client.flag_strategy(&admin, &unknown_strategy);
+}
+
+#[test]
+#[should_panic]
+fn test_flag_strategy_non_admin_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let strategy = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.add_strategy(&strategy);
+
+    // Non-admin trying to flag — should return Unauthorized error (panics via unwrap)
+    client.flag_strategy(&non_admin, &strategy);
+}
+
+#[test]
+fn test_remove_strategy_delists_strategy() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    // Register mock strategy contract so cross-contract balance() call works
+    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
+    mock_client.init(&admin, &asset);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.add_strategy(&mock_id);
+
+    assert_eq!(client.get_strategies().len(), 1);
+
+    client.remove_strategy(&admin, &mock_id);
+
+    assert_eq!(client.get_strategies().len(), 0);
+}
+
+#[test]
+fn test_remove_strategy_withdraws_funds_first() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
+    mock_client.init(&admin, &asset);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.add_strategy(&mock_id);
+
+    // Seed strategy with a balance
+    mock_client.set_balance(&500i128);
+    client.set_total_assets(&500i128);
+
+    // Remove strategy — should withdraw the 500 first
+    client.remove_strategy(&admin, &mock_id);
+
+    // After removal the mock strategy's balance should be drained
+    assert_eq!(mock_client.balance(), 0i128);
+    // Vault total_assets should be adjusted
+    assert_eq!(client.total_assets(), 0i128);
+    // Strategy list should be empty
+    assert_eq!(client.get_strategies().len(), 0);
+}
+
+#[test]
+fn test_remove_strategy_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
+    mock_client.init(&admin, &asset);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.add_strategy(&mock_id);
+
+    client.remove_strategy(&admin, &mock_id);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+}
+
+#[test]
+#[should_panic]
+fn test_remove_strategy_not_listed_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let unknown = Address::generate(&env);
+    client.remove_strategy(&admin, &unknown);
+}
+
+#[test]
+fn test_check_strategy_health_healthy_strategy() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
+    mock_client.init(&admin, &asset);
+    mock_client.set_balance(&1000i128);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.add_strategy(&mock_id);
+
+    // Health check on a strategy with positive balance — no flagging expected
+    let flagged = client.check_strategy_health();
+    assert_eq!(flagged.len(), 0);
+
+    // Health value should be updated to current balance (1000)
+    assert_eq!(client.get_strategy_health(&mock_id), 1000i128);
+}
+
+#[test]
+fn test_check_strategy_health_flags_dropped_to_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
+    mock_client.init(&admin, &asset);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.add_strategy(&mock_id);
+
+    // First, record a positive health reading
+    mock_client.set_balance(&500i128);
+    client.check_strategy_health();
+    assert_eq!(client.get_strategy_health(&mock_id), 500i128);
+
+    // Simulate strategy losing all funds
+    mock_client.set_balance(&0i128);
+
+    // Second health check should detect the drop and flag the strategy
+    let flagged = client.check_strategy_health();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged.get(0).unwrap(), mock_id);
+
+    // Stored sentinel should be -1
+    assert_eq!(client.get_strategy_health(&mock_id), -1i128);
+}
+
+#[test]
+fn test_get_strategy_health_default_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let strategy = Address::generate(&env);
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.add_strategy(&strategy);
+
+    // No health recorded yet → default is 0
+    assert_eq!(client.get_strategy_health(&strategy), 0i128);
 }
