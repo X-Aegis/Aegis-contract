@@ -1,7 +1,10 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Map, Vec, token,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, Env, Map, Vec,
 };
+
+mod flash_loan;
 
 // ─────────────────────────────────────────────
 // Strategy health status
@@ -27,6 +30,10 @@ pub enum Error {
     NoStrategies    = 5,
     StrategyNotFound = 6,
     StrategyFlagged  = 7,
+    ProviderNotWhitelisted = 8,
+    ProviderAlreadyWhitelisted = 9,
+    ProviderNotFound = 10,
+    FeeTooHigh = 11,
 }
 
 // ─────────────────────────────────────────────
@@ -50,6 +57,10 @@ pub enum DataKey {
     OracleAllocations,
     /// Stores HealthStatus for each registered strategy address.
     StrategyHealth(Address),
+    /// Whitelist of verified flash-loan providers.
+    FlashLoanProviders,
+    /// Maximum flash-loan fee accepted, in basis points of the principal.
+    MaxFlashLoanFeeBps,
 }
 
 // ─────────────────────────────────────────────
@@ -438,6 +449,145 @@ impl VolatilityShield {
 
         env.events().publish((symbol_short!("harvest"),), total_yield);
         Ok(total_yield)
+    }
+
+    // ── Flash Loan Support (SC-32) ────────────
+    //
+    // Lets the admin/oracle pull liquidity from a *whitelisted* flash-loan
+    // provider to rebalance, then repays it atomically within the same
+    // transaction. See flash_loan.rs for the security model.
+
+    /// Default cap on a provider's fee: 1% (100 bps) of the borrowed principal.
+    const DEFAULT_MAX_FLASH_LOAN_FEE_BPS: u32 = 100;
+
+    /// Whitelist a verified flash-loan provider. Admin-only.
+    pub fn add_flash_loan_provider(env: Env, caller: Address, provider: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut providers = Self::get_flash_loan_providers(env.clone());
+        if providers.contains(provider.clone()) {
+            return Err(Error::ProviderAlreadyWhitelisted);
+        }
+        providers.push_back(provider.clone());
+        env.storage().instance().set(&DataKey::FlashLoanProviders, &providers);
+
+        env.events().publish((symbol_short!("FLProvdr"), symbol_short!("added")), provider);
+        Ok(())
+    }
+
+    /// Remove a flash-loan provider from the whitelist. Admin-only.
+    pub fn remove_flash_loan_provider(env: Env, caller: Address, provider: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut providers = Self::get_flash_loan_providers(env.clone());
+        let mut found: Option<u32> = None;
+        for (i, p) in providers.iter().enumerate() {
+            if p == provider {
+                found = Some(i as u32);
+                break;
+            }
+        }
+        let idx = found.ok_or(Error::ProviderNotFound)?;
+        providers.remove(idx);
+        env.storage().instance().set(&DataKey::FlashLoanProviders, &providers);
+
+        env.events().publish((symbol_short!("FLProvdr"), symbol_short!("removed")), provider);
+        Ok(())
+    }
+
+    /// Returns the list of whitelisted flash-loan providers.
+    pub fn get_flash_loan_providers(env: Env) -> Vec<Address> {
+        env.storage().instance().get(&DataKey::FlashLoanProviders).unwrap_or(Vec::new(&env))
+    }
+
+    /// Whether `provider` is a whitelisted flash-loan provider.
+    pub fn is_flash_loan_provider(env: Env, provider: Address) -> bool {
+        Self::get_flash_loan_providers(env).contains(provider)
+    }
+
+    /// Set the maximum acceptable flash-loan fee, in basis points. Admin-only.
+    pub fn set_max_flash_loan_fee_bps(env: Env, caller: Address, bps: u32) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::MaxFlashLoanFeeBps, &bps);
+        Ok(())
+    }
+
+    /// Maximum accepted flash-loan fee in basis points (defaults to 1%).
+    pub fn max_flash_loan_fee_bps(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxFlashLoanFeeBps)
+            .unwrap_or(Self::DEFAULT_MAX_FLASH_LOAN_FEE_BPS)
+    }
+
+    /// Flash-loan callback — the vault's receiver hook, invoked by a
+    /// whitelisted provider after it lends `amount` of `token` to the vault.
+    ///
+    /// Soroban forbids contract re-entry, so the flash loan is **provider-
+    /// initiated**: an admin-authorized transaction calls the provider, which
+    /// lends to the vault and then calls this function (the vault appears only
+    /// once on the call stack). The vault uses the borrowed liquidity for the
+    /// rebalance window and repays `amount + fee` to the provider with a token
+    /// transfer (never a call back into the provider — so no re-entry). The
+    /// provider verifies repayment after this returns; if anything here traps,
+    /// the whole transaction — including the lend — reverts.
+    ///
+    /// Guards:
+    /// - `admin.require_auth()` — only an admin-authorized rebalance can pull a
+    ///   flash loan, so the callback can't be invoked by an arbitrary caller to
+    ///   drain the vault.
+    /// - `initiator` (the provider) must be whitelisted — the vault only ever
+    ///   repays known, verified providers.
+    /// - the fee must not exceed the configured cap.
+    pub fn flash_loan_callback(
+        env: Env,
+        token: Address,
+        amount: i128,
+        fee: i128,
+        initiator: Address,
+    ) {
+        // Only an admin-authorized rebalance may use a flash loan.
+        Self::get_admin(&env).require_auth();
+
+        // The vault only repays verified, whitelisted providers.
+        if !Self::get_flash_loan_providers(env.clone()).contains(initiator.clone()) {
+            panic_with_error!(&env, Error::ProviderNotWhitelisted);
+        }
+        if amount <= 0 || fee < 0 {
+            panic_with_error!(&env, Error::NegativeAmount);
+        }
+        let max_fee = amount
+            .checked_mul(Self::max_flash_loan_fee_bps(&env) as i128)
+            .unwrap()
+            .checked_div(10000)
+            .unwrap();
+        if fee > max_fee {
+            panic_with_error!(&env, Error::FeeTooHigh);
+        }
+
+        // Rebalance window: the borrowed `amount` is now held by the vault and
+        // available to the rebalance flow before being repaid in this same tx.
+        env.events().publish((symbol_short!("FlashLn"), symbol_short!("rebal")), amount);
+
+        // Repay principal + fee to the provider atomically (a token transfer,
+        // not a call into the provider, so the vault is never re-entered).
+        let repayment = amount.checked_add(fee).unwrap();
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &initiator,
+            &repayment,
+        );
+
+        env.events().publish((symbol_short!("FlashLn"), symbol_short!("repaid")), repayment);
     }
 
     // ── View helpers ──────────────────────────
