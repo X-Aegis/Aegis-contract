@@ -596,3 +596,251 @@ fn test_get_strategy_health_default_zero() {
     // No health recorded yet → default is 0
     assert_eq!(client.get_strategy_health(&strategy), 0i128);
 }
+
+// ─────────────────────────────────────────────
+// Flash Loan Support (SC-32)
+// ─────────────────────────────────────────────
+
+use soroban_sdk::{contract, contractimpl, symbol_short};
+use crate::flash_loan::FlashLoanReceiverClient;
+
+/// Minimal flash-loan provider used to drive the vault's flash-loan flow in
+/// tests. It lends `amount`, calls the vault's `flash_loan_callback`, and then
+/// asserts it was repaid `amount + fee` — mirroring how a real provider
+/// enforces atomicity after the callback returns.
+#[contract]
+pub struct MockFlashLoanProvider;
+
+#[contractimpl]
+impl MockFlashLoanProvider {
+    pub fn init(env: Env, fee_bps: u32) {
+        env.storage().instance().set(&symbol_short!("fee_bps"), &fee_bps);
+    }
+
+    pub fn flash_loan(env: Env, receiver: Address, token: Address, amount: i128) {
+        let fee_bps: u32 = env.storage().instance().get(&symbol_short!("fee_bps")).unwrap_or(0);
+        let fee = amount * fee_bps as i128 / 10000;
+
+        let tc = TokenClient::new(&env, &token);
+        let me = env.current_contract_address();
+        let before = tc.balance(&me);
+
+        // Lend the principal, then hand control to the vault's callback.
+        tc.transfer(&me, &receiver, &amount);
+        FlashLoanReceiverClient::new(&env, &receiver).flash_loan_callback(&token, &amount, &fee, &me);
+
+        // Atomicity: must have been repaid principal + fee, else revert all.
+        let after = tc.balance(&me);
+        if after < before + fee {
+            panic!("flash loan not repaid");
+        }
+    }
+}
+
+/// Spin up an initialized vault + token, returning the pieces tests need.
+fn setup_vault<'a>(
+    env: &'a Env,
+) -> (
+    VolatilityShieldClient<'a>,
+    Address,
+    StellarAssetClient<'a>,
+    TokenClient<'a>,
+    Address,
+) {
+    let token_admin = Address::generate(env);
+    let (token_id, sac, tc) = create_token_contract(env, &token_admin);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let oracle = Address::generate(env);
+    let treasury = Address::generate(env);
+    client.init(&admin, &token_id, &oracle, &treasury, &0u32);
+
+    (client, admin, sac, tc, token_id)
+}
+
+/// Register + initialize a mock provider charging `fee_bps`, funded with
+/// `funding` of the token so it can lend.
+fn setup_provider<'a>(
+    env: &'a Env,
+    sac: &StellarAssetClient,
+    fee_bps: u32,
+    funding: i128,
+) -> Address {
+    let provider_id = env.register_contract(None, MockFlashLoanProvider);
+    MockFlashLoanProviderClient::new(env, &provider_id).init(&fee_bps);
+    sac.mint(&provider_id, &funding);
+    provider_id
+}
+
+#[test]
+fn test_flash_loan_whitelist_add_remove() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let provider = Address::generate(&env);
+    assert!(!client.is_flash_loan_provider(&provider));
+
+    client.add_flash_loan_provider(&admin, &provider);
+    assert!(client.is_flash_loan_provider(&provider));
+    assert_eq!(client.get_flash_loan_providers().len(), 1);
+
+    client.remove_flash_loan_provider(&admin, &provider);
+    assert!(!client.is_flash_loan_provider(&provider));
+    assert_eq!(client.get_flash_loan_providers().len(), 0);
+}
+
+#[test]
+fn test_flash_loan_add_provider_requires_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let stranger = Address::generate(&env);
+    let provider = Address::generate(&env);
+    assert_eq!(
+        client.try_add_flash_loan_provider(&stranger, &provider),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn test_flash_loan_add_duplicate_provider_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let provider = Address::generate(&env);
+    client.add_flash_loan_provider(&admin, &provider);
+    assert_eq!(
+        client.try_add_flash_loan_provider(&admin, &provider),
+        Err(Ok(Error::ProviderAlreadyWhitelisted))
+    );
+}
+
+#[test]
+fn test_flash_loan_remove_unknown_provider_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let provider = Address::generate(&env);
+    assert_eq!(
+        client.try_remove_flash_loan_provider(&admin, &provider),
+        Err(Ok(Error::ProviderNotFound))
+    );
+}
+
+#[test]
+fn test_flash_loan_happy_path_borrow_and_repay() {
+    let env = Env::default();
+    // The admin authorizes the nested flash_loan_callback (a non-root auth).
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, sac, tc, token) = setup_vault(&env);
+
+    // Provider charges 0.5% (within the 1% default cap) and can lend 1000.
+    let provider_id = setup_provider(&env, &sac, 50u32, 1000);
+    client.add_flash_loan_provider(&admin, &provider_id);
+
+    // The vault holds 100 to cover the fee.
+    sac.mint(&client.address, &100);
+
+    // Provider-initiated: lends to the vault and calls flash_loan_callback.
+    MockFlashLoanProviderClient::new(&env, &provider_id).flash_loan(&client.address, &token, &1000);
+
+    // Fee = 1000 * 0.5% = 5. Provider gained the fee; the vault paid it.
+    assert_eq!(tc.balance(&provider_id), 1005);
+    assert_eq!(tc.balance(&client.address), 95);
+}
+
+#[test]
+#[should_panic]
+fn test_flash_loan_non_whitelisted_provider_reverts() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, _admin, sac, _tc, token) = setup_vault(&env);
+
+    // Provider is NOT whitelisted → the callback rejects it and the whole
+    // flash loan (including the lend) reverts.
+    let provider_id = setup_provider(&env, &sac, 0u32, 1000);
+    sac.mint(&client.address, &100);
+
+    MockFlashLoanProviderClient::new(&env, &provider_id).flash_loan(&client.address, &token, &1000);
+}
+
+#[test]
+#[should_panic]
+fn test_flash_loan_callback_rejects_unwhitelisted_initiator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _sac, _tc, token) = setup_vault(&env);
+
+    // Calling the callback directly with an address that is not a whitelisted
+    // provider must trap — the vault never repays unknown addresses.
+    let stranger = Address::generate(&env);
+    client.flash_loan_callback(&token, &1000, &0, &stranger);
+}
+
+#[test]
+#[should_panic]
+fn test_flash_loan_fee_exceeding_cap_reverts() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, sac, _tc, token) = setup_vault(&env);
+
+    // Provider charges 2% — above the 1% default cap → callback traps.
+    let provider_id = setup_provider(&env, &sac, 200u32, 1000);
+    client.add_flash_loan_provider(&admin, &provider_id);
+    sac.mint(&client.address, &100);
+
+    MockFlashLoanProviderClient::new(&env, &provider_id).flash_loan(&client.address, &token, &1000);
+}
+
+#[test]
+#[should_panic]
+fn test_flash_loan_unrepayable_reverts() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, sac, _tc, token) = setup_vault(&env);
+
+    // Vault is NOT funded for the fee, so it cannot repay principal + fee and
+    // the provider's repayment check reverts the transaction.
+    let provider_id = setup_provider(&env, &sac, 50u32, 1000);
+    client.add_flash_loan_provider(&admin, &provider_id);
+
+    MockFlashLoanProviderClient::new(&env, &provider_id).flash_loan(&client.address, &token, &1000);
+}
+
+#[test]
+fn test_set_max_flash_loan_fee_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    assert_eq!(client.max_flash_loan_fee_bps(), 100);
+    client.set_max_flash_loan_fee_bps(&admin, &250u32);
+    assert_eq!(client.max_flash_loan_fee_bps(), 250);
+}
+
+#[test]
+fn test_flash_loan_higher_cap_allows_larger_fee() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, sac, tc, token) = setup_vault(&env);
+
+    // Raise the cap to 2% so a 2% provider fee is now within bounds.
+    client.set_max_flash_loan_fee_bps(&admin, &200u32);
+
+    let provider_id = setup_provider(&env, &sac, 200u32, 1000);
+    client.add_flash_loan_provider(&admin, &provider_id);
+    sac.mint(&client.address, &100);
+
+    MockFlashLoanProviderClient::new(&env, &provider_id).flash_loan(&client.address, &token, &1000);
+
+    // Fee = 1000 * 2% = 20.
+    assert_eq!(tc.balance(&provider_id), 1020);
+    assert_eq!(tc.balance(&client.address), 80);
+}
