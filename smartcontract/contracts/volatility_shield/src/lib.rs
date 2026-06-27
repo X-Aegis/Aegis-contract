@@ -70,6 +70,10 @@ pub enum DataKey {
     PendingWithdrawals,
     /// Monotonically incrementing counter for withdrawal IDs.
     WithdrawQueueCounter,
+    /// Annualised percentage yield against which performance is measured (BPS, default 500 = 5%).
+    BenchmarkRate,
+    /// Current vault APY in BPS set by the oracle each epoch.
+    CurrentVaultApy,
 }
 
 // ─────────────────────────────────────────────
@@ -745,12 +749,81 @@ impl VolatilityShield {
         env.storage().persistent().get(&DataKey::Balance(user)).unwrap_or(0)
     }
 
+    /// Write the benchmark yield rate used for dynamic fee calculation.
+    /// Stored in basis points (e.g. 500 = 5%). Admin-only.
+    pub fn set_benchmark_rate(env: Env, caller: Address, bps: u32) {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) { panic!("Unauthorized"); }
+        env.storage().instance().set(&DataKey::BenchmarkRate, &bps);
+        env.events().publish((symbol_short!("Benchmark"), symbol_short!("set")), bps);
+    }
+
+    /// Read the configured benchmark rate in BPS (defaults to 0).
+    pub fn benchmark_rate(env: &Env) -> u32 {
+        env.storage().instance().get(&DataKey::BenchmarkRate).unwrap_or(0)
+    }
+
+    /// Write the current vault APY (BPS) used for dynamic fee scaling.
+    /// Set by the oracle each epoch. Admin-only.
+    pub fn set_current_vault_apy(env: Env, caller: Address, bps: u32) {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) { panic!("Unauthorized"); }
+        env.storage().instance().set(&DataKey::CurrentVaultApy, &bps);
+        env.events().publish((symbol_short!("VaultApy"), symbol_short!("set")), bps);
+    }
+
+    /// Read the current vault APY in BPS (defaults to 0).
+    pub fn current_vault_apy(env: &Env) -> u32 {
+        env.storage().instance().get(&DataKey::CurrentVaultApy).unwrap_or(0)
+    }
+
     // ── Internal Helpers ──────────────────────
     pub fn take_fees(env: &Env, amount: i128) -> (i128, i128) {
-        let fee_pct = Self::fee_percentage(&env);
+        let fee_pct = Self::effective_fee_pct(&env);
         if fee_pct == 0 { return (amount, 0); }
         let fee = amount.checked_mul(fee_pct as i128).unwrap().checked_div(10000).unwrap();
         (amount - fee, fee)
+    }
+
+    /// Returns the dynamic fee percentage (BPS) scaled by performance vs benchmark.
+    /// - Outperforming (apy > benchmark): fee scales up linearly, capped at 2× base
+    /// - Underperforming (apy < benchmark): fee scales down, floored at 0.5× base
+    /// - No benchmark data → falls back to base fee
+    fn effective_fee_pct(env: &Env) -> u32 {
+        let base = Self::fee_percentage(&env);
+        if base == 0 { return 0; }
+
+        let vault_apy = env.storage().instance().get(&DataKey::CurrentVaultApy).unwrap_or(0u32);
+        let benchmark = env.storage().instance().get(&DataKey::BenchmarkRate).unwrap_or(0u32);
+
+        if benchmark == 0 || vault_apy == 0 { return base; }
+
+        // Scale: fee = base * (1 + (vault_apy - benchmark) / benchmark)
+        // Multiplier clamped between 0.5× and 2.0×
+        let ratio: u64 = (vault_apy as u64).checked_mul(10000).unwrap_or(0)
+            .checked_div(benchmark as u64).unwrap_or(10000);
+
+        // Convert ratio (10000 = 1.0) to multiplier in basis points
+        let multiplier_bps = if ratio > 10000 {
+            // vault_apy > benchmark → fee increases
+            let excess = ratio - 10000;
+            // Clamp excess: at most 100% above benchmark gives 2× base
+            let capped_excess = if excess > 10000 { 10000 } else { excess };
+            10000u64 + capped_excess
+        } else {
+            // vault_apy < benchmark → fee decreases
+            let deficit = 10000 - ratio;
+            let capped_deficit = if deficit > 5000 { 5000 } else { deficit };
+            10000u64 - capped_deficit
+        };
+
+        let effective: u64 = (base as u64)
+            .checked_mul(multiplier_bps)
+            .unwrap_or(0)
+            .checked_div(10000)
+            .unwrap_or(base as u64);
+
+        effective as u32
     }
 
     pub fn convert_to_shares(env: Env, amount: i128) -> i128 {
