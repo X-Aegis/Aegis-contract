@@ -159,6 +159,165 @@ fn test_take_fees() {
 }
 
 #[test]
+fn test_set_and_get_benchmark_rate() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_all_auths_allowing_non_root_auth();
+    client.init(&admin, &asset, &oracle, &treasury, &500u32);
+
+    assert_eq!(client.benchmark_rate(), 0u32);
+
+    client.set_benchmark_rate(&admin, &500u32); // 5%
+    assert_eq!(client.benchmark_rate(), 500u32);
+}
+
+#[test]
+fn test_set_and_get_current_vault_apy() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_all_auths_allowing_non_root_auth();
+    client.init(&admin, &asset, &oracle, &treasury, &500u32);
+
+    assert_eq!(client.current_vault_apy(), 0u32);
+
+    client.set_current_vault_apy(&admin, &1200u32); // 12%
+    assert_eq!(client.current_vault_apy(), 1200u32);
+}
+
+#[test]
+#[should_panic]
+fn test_benchmark_setter_requires_admin() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let other = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_all_auths();
+    client.init(&admin, &asset, &oracle, &treasury, &500u32);
+
+    client.set_benchmark_rate(&other, &500u32);
+}
+
+#[test]
+fn test_take_fees_dynamic_outperform() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_all_auths_allowing_non_root_auth();
+
+    // Base fee = 5% (500 BPS), Benchmark = 5% (500 BPS), Vault APY = 10% (1000 BPS)
+    client.init(&admin, &asset, &oracle, &treasury, &500u32);
+    client.set_benchmark_rate(&admin, &500u32);
+    client.set_current_vault_apy(&admin, &1000u32);
+
+    // vault_apy / benchmark = 1000/500 = 2.0 → multiplier = 2.0
+    // capped at 2.0× → effective fee = 500 * 2 = 1000 BPS = 10%
+    let (remaining, fee) = client.take_fees(&1000i128);
+    assert_eq!(fee, 100);
+    assert_eq!(remaining, 900);
+}
+
+#[test]
+fn test_take_fees_dynamic_underperform() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    // Base fee = 5% (500 BPS), Benchmark = 10% (1000 BPS), Vault APY = 5% (500 BPS)
+    env.mock_all_auths_allowing_non_root_auth();
+    client.init(&admin, &asset, &oracle, &treasury, &500u32);
+    client.set_benchmark_rate(&admin, &1000u32);
+    client.set_current_vault_apy(&admin, &500u32);
+
+    // vault_apy / benchmark = 500/1000 = 0.5 → multiplier = 0.5
+    // effective fee = 500 * 0.5 = 250 BPS = 2.5%
+    let (remaining, fee) = client.take_fees(&1000i128);
+    assert_eq!(fee, 25);
+    assert_eq!(remaining, 975);
+}
+
+#[test]
+fn test_take_fees_falls_back_to_base_when_no_benchmark() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    // No benchmark or APY set → base fee applies
+    env.mock_all_auths_allowing_non_root_auth();
+    client.init(&admin, &asset, &oracle, &treasury, &200u32);
+
+    let (remaining, fee) = client.take_fees(&1000i128);
+    assert_eq!(fee, 20);
+    assert_eq!(remaining, 980);
+}
+
+#[test]
+fn test_take_fees_extreme_outperformance_capped() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    // 500% APY vs 5% benchmark → ratio 100×, but multiplier capped at 2.0×
+    env.mock_all_auths_allowing_non_root_auth();
+    client.init(&admin, &asset, &oracle, &treasury, &500u32);
+    client.set_benchmark_rate(&admin, &500u32);
+    client.set_current_vault_apy(&admin, &50000u32);
+
+    let (remaining, fee) = client.take_fees(&1000i128);
+    assert_eq!(fee, 100); // capped at 2× base = 1000 BPS = 10%
+    assert_eq!(remaining, 900);
+}
+
+#[test]
+fn test_take_fees_zero_fee_always_zero() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    env.mock_all_auths_allowing_non_root_auth();
+
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_benchmark_rate(&admin, &500u32);
+    client.set_current_vault_apy(&admin, &2000u32);
+
+    let (remaining, fee) = client.take_fees(&1000i128);
+    assert_eq!(fee, 0);
+    assert_eq!(remaining, 1000);
+}
+
+#[test]
 fn test_withdraw_success() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
