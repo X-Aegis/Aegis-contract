@@ -34,6 +34,9 @@ pub enum Error {
     ProviderAlreadyWhitelisted = 9,
     ProviderNotFound = 10,
     FeeTooHigh = 11,
+    BelowThreshold = 12,
+    WithdrawalNotFound = 13,
+    WithdrawalAlreadyProcessed = 14,
 }
 
 // ─────────────────────────────────────────────
@@ -61,6 +64,12 @@ pub enum DataKey {
     FlashLoanProviders,
     /// Maximum flash-loan fee accepted, in basis points of the principal.
     MaxFlashLoanFeeBps,
+    /// Minimum share amount that triggers queueing instead of instant withdrawal.
+    WithdrawQueueThreshold,
+    /// Map of queued withdrawal IDs to PendingWithdrawal data.
+    PendingWithdrawals,
+    /// Monotonically incrementing counter for withdrawal IDs.
+    WithdrawQueueCounter,
 }
 
 // ─────────────────────────────────────────────
@@ -69,6 +78,18 @@ pub enum DataKey {
 pub struct StrategyClient<'a> {
     env:     &'a Env,
     address: Address,
+}
+
+// ── Withdrawal Queue ───────────────────────
+
+/// A pending withdrawal that has been queued because it exceeds the threshold.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub struct PendingWithdrawal {
+  pub from: Address,
+  pub shares: i128,
+  pub created_at: u64,
+  pub processed: bool,
 }
 
 impl<'a> StrategyClient<'a> {
@@ -187,8 +208,105 @@ impl VolatilityShield {
             env.events().publish((symbol_short!("Fee"), symbol_short!("collect")), fee);
         }
 
-        env.events().publish((symbol_short!("Withdraw"), from.clone()), shares);
+    env.events().publish((symbol_short!("Withdraw"), from.clone()), shares);
+  }
+
+  // ── Withdrawal Queue ───────────────────────
+
+  /// Queue a withdrawal when `shares` exceeds the configured threshold.
+  /// The withdrawal is stored in the pending queue and must be processed
+  /// by the admin/oracle via `process_queued_withdrawal`.
+  pub fn queue_withdraw(env: Env, from: Address, shares: i128) -> Result<u32, Error> {
+    if shares <= 0 {
+      panic!("shares to withdraw must be positive");
     }
+    from.require_auth();
+
+    let balance_key = DataKey::Balance(from.clone());
+    let current_balance: i128 = env
+      .storage()
+      .persistent()
+      .get(&balance_key)
+      .unwrap_or(0);
+    if current_balance < shares {
+      panic!("insufficient shares for withdrawal");
+    }
+
+    let threshold: i128 = env
+      .storage()
+      .instance()
+      .get(&DataKey::WithdrawQueueThreshold)
+      .unwrap_or(0);
+
+    if threshold > 0 && shares < threshold {
+      return Err(Error::BelowThreshold);
+    }
+
+    let counter: u32 = env
+      .storage()
+      .instance()
+      .get(&DataKey::WithdrawQueueCounter)
+      .unwrap_or(0);
+    let withdrawal_id = counter + 1;
+    env
+      .storage()
+      .instance()
+      .set(&DataKey::WithdrawQueueCounter, &withdrawal_id);
+
+    let pending = PendingWithdrawal {
+      from: from.clone(),
+      shares,
+      created_at: env.ledger().timestamp(),
+      processed: false,
+    };
+
+    env
+      .storage()
+      .persistent()
+      .set(&DataKey::PendingWithdrawals, &pending);
+
+    // Deduct shares immediately so they cannot be double-spent
+    env
+      .storage()
+      .persistent()
+      .set(
+        &balance_key,
+        &(current_balance.checked_sub(shares).unwrap()),
+      );
+
+    env.events().publish(
+      (symbol_short!("Withdraw"), symbol_short!("queued")),
+      shares,
+    );
+
+    Ok(withdrawal_id)
+  }
+
+  /// Set the withdrawal queue threshold. Admin-only.
+  pub fn set_withdraw_queue_threshold(
+    env: Env,
+    caller: Address,
+    threshold: i128,
+  ) {
+    caller.require_auth();
+    let admin = Self::get_admin(&env);
+    if caller != admin {
+      panic!("Unauthorized");
+    }
+    env
+      .storage()
+      .instance()
+      .set(&DataKey::WithdrawQueueThreshold, &threshold);
+  }
+
+  /// Read the current withdrawal queue threshold.
+  pub fn get_withdraw_queue_threshold(env: &Env) -> i128 {
+    env
+      .storage()
+      .instance()
+      .get(&DataKey::WithdrawQueueThreshold)
+      .unwrap_or(0)
+  }
 
     // ── Oracle Data ──────────────────────────────
     pub fn set_max_staleness(env: Env, caller: Address, max_staleness: u64) {
