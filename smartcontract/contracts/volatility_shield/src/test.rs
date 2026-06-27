@@ -844,3 +844,145 @@ fn test_flash_loan_higher_cap_allows_larger_fee() {
     assert_eq!(tc.balance(&provider_id), 1020);
     assert_eq!(tc.balance(&client.address), 80);
 }
+
+// ── Withdrawal Queue Tests ──────────────────────────────────────
+
+#[test]
+fn test_queue_withdraw_above_threshold() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    // Set threshold to 500 shares
+    client.set_withdraw_queue_threshold(&admin, &500);
+
+    // Withdraw 600 shares (above threshold) -> should queue
+    let id = client.queue_withdraw(&admin, &600);
+    assert_eq!(id, 1);
+
+    // Balance should be reduced immediately
+    assert_eq!(client.balance(&admin), 400);
+}
+
+#[test]
+fn test_queue_withdraw_below_threshold_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    client.set_withdraw_queue_threshold(&admin, &500);
+
+    // Withdraw 200 shares (below threshold) -> should fail
+    let result = client.try_queue_withdraw(&admin, &200);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_queue_withdraw_default_threshold() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    // With default threshold (0), any withdrawal queues
+    let id = client.queue_withdraw(&admin, &100);
+    assert_eq!(id, 1);
+}
+
+#[test]
+fn test_queue_withdraw_insufficient_shares_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &500);
+
+    client.set_withdraw_queue_threshold(&admin, &100);
+
+    // Try to withdraw more shares than balance
+    let result = client.try_queue_withdraw(&admin, &600);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_and_get_queue_threshold() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, _tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, VolatilityShield);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    assert_eq!(client.get_withdraw_queue_threshold(), 0);
+
+    client.set_withdraw_queue_threshold(&admin, &1000);
+    assert_eq!(client.get_withdraw_queue_threshold(), 1000);
+}
