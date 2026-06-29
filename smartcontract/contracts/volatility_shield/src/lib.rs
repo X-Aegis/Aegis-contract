@@ -5,6 +5,8 @@ use soroban_sdk::{
 };
 
 mod flash_loan;
+pub mod cross_chain;
+use cross_chain::{BridgeEndpoint, CrossChainRebalancePayload, TargetChain};
 
 // ─────────────────────────────────────────────
 // Strategy health status
@@ -74,6 +76,12 @@ pub enum DataKey {
     BenchmarkRate,
     /// Current vault APY in BPS set by the oracle each epoch.
     CurrentVaultApy,
+    /// List of registered cross-chain bridge endpoints.
+    CrossChainEndpoints,
+    /// Counter for cross-chain bridge endpoint IDs.
+    CrossChainEndpointCounter,
+    /// Monotonically incrementing nonce for CrossChainRebalance payloads.
+    CrossChainRebalanceNonce,
 }
 
 // ─────────────────────────────────────────────
@@ -858,6 +866,181 @@ impl VolatilityShield {
         env.storage().instance().set(&DataKey::Token, &token);
     }
 
-}
+    // ── Cross-Chain Rebalance Messaging (SC-33) ──────────
 
-mod test;
+    /// Register a cross-chain bridge endpoint. Admin-only.
+    /// Returns the assigned endpoint ID.
+    pub fn add_cross_chain_endpoint(
+        env: Env,
+        caller: Address,
+        chain: TargetChain,
+        destination_contract: soroban_sdk::Bytes,
+        label: soroban_sdk::Symbol,
+    ) -> Result<u32, Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+
+        let counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CrossChainEndpointCounter)
+            .unwrap_or(0);
+        let id = counter + 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::CrossChainEndpointCounter, &id);
+
+        let endpoint = BridgeEndpoint {
+            id,
+            chain,
+            destination_contract,
+            label,
+            enabled: true,
+        };
+
+        let mut endpoints: Vec<BridgeEndpoint> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CrossChainEndpoints)
+            .unwrap_or(Vec::new(&env));
+        endpoints.push_back(endpoint);
+        env.storage()
+            .instance()
+            .set(&DataKey::CrossChainEndpoints, &endpoints);
+
+        env.events().publish(
+            (symbol_short!("XChain"), symbol_short!("endp_add")),
+            id,
+        );
+
+        Ok(id)
+    }
+
+    /// Remove a cross-chain bridge endpoint. Admin-only.
+    pub fn remove_cross_chain_endpoint(
+        env: Env,
+        caller: Address,
+        endpoint_id: u32,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+
+        let endpoints: Vec<BridgeEndpoint> = env
+            .storage()
+            .instance()
+            .get(&DataKey::CrossChainEndpoints)
+            .unwrap_or(Vec::new(&env));
+
+        let mut new_endpoints = Vec::new(&env);
+        let mut found = false;
+        for i in 0..endpoints.len() {
+            let ep = endpoints.get(i).unwrap();
+            if ep.id == endpoint_id {
+                found = true;
+            } else {
+                new_endpoints.push_back(ep);
+            }
+        }
+
+        if !found {
+            return Err(Error::StrategyNotFound); // closest existing error
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CrossChainEndpoints, &new_endpoints);
+
+        env.events().publish(
+            (symbol_short!("XChain"), symbol_short!("endp_rem")),
+            endpoint_id,
+        );
+
+        Ok(())
+    }
+
+    /// Get all registered cross-chain bridge endpoints.
+    pub fn get_cross_chain_endpoints(env: Env) -> Vec<BridgeEndpoint> {
+        env.storage()
+            .instance()
+            .get(&DataKey::CrossChainEndpoints)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Emit a `CrossChainRebalance` payload event.
+    ///
+    /// Records the payload in persistent storage under a nonce key and
+    /// publishes a Soroban event for off-chain relayers to pick up.
+    /// The relayer is responsible for delivering the payload to the
+    /// target bridge and destination chain.
+    ///
+    /// # Arguments
+    /// * `caller` — Must be the admin or oracle.
+    /// * `destination_chain` — The target chain ID.
+    /// * `destination_contract` — The contract/account on the target chain.
+    /// * `asset` — The token address to rebalance.
+    /// * `amount` — The amount to transfer (base units).
+    /// * `memo` — Optional reference for the target chain.
+    ///
+    /// # Returns
+    /// The nonce of this payload (for tracking/dedup).
+    pub fn emit_cross_chain_rebalance(
+        env: Env,
+        caller: Address,
+        destination_chain: u64,
+        destination_contract: soroban_sdk::Bytes,
+        asset: Address,
+        amount: i128,
+        memo: soroban_sdk::Bytes,
+    ) -> Result<u64, Error> {
+        caller.require_auth();
+        let admin = Self::get_admin(&env);
+        let oracle = Self::get_oracle(&env);
+        if caller != admin && caller != oracle {
+            return Err(Error::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(Error::NegativeAmount);
+        }
+
+        let nonce: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CrossChainRebalanceNonce)
+            .unwrap_or(0);
+        let next_nonce = nonce + 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::CrossChainRebalanceNonce, &next_nonce);
+
+        let payload = CrossChainRebalancePayload {
+            nonce: next_nonce,
+            source: env.current_contract_address(),
+            destination_chain,
+            destination_contract,
+            asset: asset.clone(),
+            amount,
+            timestamp: env.ledger().timestamp(),
+            memo,
+        };
+
+        // Store payload so off-chain relayer can query
+        env.storage()
+            .persistent()
+            .set(&DataKey::CrossChainRebalanceNonce, &payload);
+
+        // Emit cross-chain rebalance event
+        env.events().publish(
+            (
+                symbol_short!("XChain"),
+                symbol_short!("rebalance"),
+            ),
+            (next_nonce, asset, amount, destination_chain),
+        );
+
+        Ok(next_nonce)
+    }
+}
