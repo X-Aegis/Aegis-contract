@@ -131,7 +131,7 @@ jobs:
           ${diff}
           
           INSTRUCTIONS:
-          If the diff successfully and safely implements the requirements described in the issue, you must output EXACTLY the word "PASS" and nothing else.
+          If the diff successfully and safely implements the requirements described in the issue, you must output "PASS" on the first line, followed by a short, friendly, and casual approval comment thanking the contributor for their work (write exactly what you want the maintainer to comment, without quotes or prefixes).
           If the diff is flawed, misses key requirements, or introduces obvious bugs, you must output "FAIL" on the first line, followed by a polite, constructive explanation of what the contributor needs to fix.`;
           
           async function run() {
@@ -160,6 +160,10 @@ jobs:
               
               if (responseText.startsWith('PASS')) {
                 console.log("AI Review: PASS");
+                const approvalMsg = responseText.replace(/^PASS\s*/i, '').trim();
+                if (approvalMsg) {
+                    fs.writeFileSync('ai_approval.txt', approvalMsg);
+                }
                 process.exit(0);
               } else {
                 console.log("AI Review: FAIL");
@@ -200,8 +204,11 @@ jobs:
             "Love the changes in '$PR_TITLE'. Spot on! Approved and merging."
           )
 
-          # Pick a random response using shuf
-          SELECTED_RESPONSE=$(shuf -n1 -e "${RESPONSES[@]}")
+          if [ -f ai_approval.txt ]; then
+            SELECTED_RESPONSE=$(cat ai_approval.txt)
+          else
+            SELECTED_RESPONSE=$(shuf -n1 -e "${RESPONSES[@]}")
+          fi
 
           # 1. Approve the PR with the dynamic comment (This looks like it came from bbkenny!)
           gh pr review "$PR_NUMBER" --approve -b "$SELECTED_RESPONSE"
