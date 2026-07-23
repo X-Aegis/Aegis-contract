@@ -32,10 +32,10 @@ jobs:
           PR_BODY=$(gh pr view ${{ github.event.pull_request.number }} --json body -q .body)
           if ! echo "$PR_BODY" | grep -Eiq "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+"; then
             RESPONSES=(
-              "hey! i noticed you didn't link an issue in your PR description. please add \`Closes #ISSUE_NUMBER\` so we can automatically close it when merged!"
-              "Thanks for the PR! Could you please link the issue it resolves using \`Closes #ISSUE_NUMBER\` in the description? It helps us track things automatically."
-              "Hey there, looks like the PR description is missing an issue link. Just drop a \`Closes #123\` in there so our systems can link them up!"
-              "Awesome start, but could you add a closing keyword like \`Closes #ISSUE\` to the PR body? That way GitHub will auto-close the issue for us."
+              "hey! i noticed you didn't link an issue in your PR description. please add \`Closes #ISSUE_NUMBER\` so we can close it when merged!"
+              "Thanks for the PR! Could you please link the issue it resolves using \`Closes #ISSUE_NUMBER\` in the description? It helps us track things better."
+              "Hey there, looks like the PR description is missing an issue link. Just drop a \`Closes #123\` in there so we can link them up!"
+              "Awesome start, but could you add a closing keyword like \`Closes #ISSUE\` to the PR body? That way GitHub will close the issue for us."
               "I'd love to review this, but we need an issue linked first! Please update the description with \`Closes #ISSUE_NUMBER\`."
               "Hey, before we proceed, please link the related issue in the description (e.g., \`Fixes #41\`). Thanks!"
             )

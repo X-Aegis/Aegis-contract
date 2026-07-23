@@ -22,9 +22,9 @@ jobs:
           
           This PR modifies CI/CD workflows inside the \`.github/workflows/\` directory.
           
-          For security reasons, only the core maintainer can review and merge workflow changes. The automated PR review bot will ignore this Pull Request.
+          For security reasons, only the core maintainer can review and merge workflow changes. I will ignore this Pull Request.
           
-          If this was unintentional, please revert the workflow file changes from your branch so the automated checks can proceed."
+          If this was unintentional, please revert the workflow file changes from your branch so the checks can proceed."
           
           # Fail the job to act as a soft block and catch attention
           exit 1
