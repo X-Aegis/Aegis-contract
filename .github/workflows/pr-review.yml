@@ -136,9 +136,12 @@ jobs:
 
           ISSUE_BODY=$(gh issue view $ISSUE_NUMBER --json body -q .body)
           PR_DIFF=$(gh pr diff $PR_NUMBER)
+          PR_COMMENTS=$(gh pr view $PR_NUMBER --json comments --jq '[.comments[].body] | join("\n\n---\n\n")')
 
           echo "$ISSUE_BODY" > issue.txt
           echo "$PR_DIFF" > diff.txt
+          echo "$PR_BODY" > pr_body.txt
+          echo "$PR_COMMENTS" > pr_comments.txt
           echo "📏 Issue body: $(wc -c < issue.txt) bytes"
           echo "📏 PR diff: $(wc -c < diff.txt) bytes"
 
@@ -148,6 +151,8 @@ jobs:
 
           const issue = fs.readFileSync('issue.txt', 'utf8');
           const diff = fs.readFileSync('diff.txt', 'utf8');
+          const prBody = fs.existsSync('pr_body.txt') ? fs.readFileSync('pr_body.txt', 'utf8') : '';
+          const prComments = fs.existsSync('pr_comments.txt') ? fs.readFileSync('pr_comments.txt', 'utf8') : '';
           const prNumber = process.env.PR_NUMBER;
           const apiKey = process.env.ANTHROPIC_API_KEY;
 
@@ -157,12 +162,19 @@ jobs:
           LINKED ISSUE DESCRIPTION:
           ${issue}
 
+          PULL REQUEST DESCRIPTION:
+          ${prBody}
+
+          PULL REQUEST COMMENTS:
+          ${prComments}
+
           PULL REQUEST DIFF:
           ${diff}
 
           INSTRUCTIONS:
-          If the diff successfully and safely implements the requirements described in the issue, you must output "PASS" on the first line, followed by a short, friendly, and casual approval comment thanking the contributor for their work (write exactly what you want the maintainer to comment, without quotes or prefixes).
-          If the diff is flawed, misses key requirements, or introduces obvious bugs, you must output "FAIL" on the first line, followed by a polite, constructive explanation of what the contributor needs to fix.
+          If the diff successfully and safely implements the requirements described in the issue, you must output "PASS" on the first line, followed by a short, friendly, and casual approval comment thanking the contributor for their work.
+          If the diff is flawed, misses key requirements, introduces obvious bugs, OR if the contributor asks an architectural/blocking question that requires your input before merging, you must output "FAIL" on the first line, followed by a polite, constructive explanation or answer.
+          IMPORTANT: If the contributor asks a non-blocking question in the description or comments, you can still output "PASS", but you MUST answer their question conversationally within your approval comment!
           CRITICAL: Act strictly as the human core maintainer. Do NOT mention you are an AI, bot, or automated system. Follow these rules to sound completely natural and human:
           - Use a conversational, casual tone (like typing in a chat).
           - Avoid all AI-sounding words (e.g., delve, leverage, robust, seamless, optimize, pivotal, well-structured, crucial).
