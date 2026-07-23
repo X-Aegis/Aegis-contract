@@ -82,6 +82,8 @@ pub enum DataKey {
     CrossChainEndpointCounter,
     /// Monotonically incrementing nonce for CrossChainRebalance payloads.
     CrossChainRebalanceNonce,
+    /// Governance token address for future governance integration.
+    GovernanceToken,
 }
 
 // ─────────────────────────────────────────────
@@ -1042,6 +1044,23 @@ impl VolatilityShield {
         );
 
         Ok(next_nonce)
+    }
+
+    // ── Governance Token (SC-29) ──────────────
+
+    /// Set the governance token address. Admin-only.
+    pub fn set_governance_token(env: Env, caller: Address, token: Address) {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            panic!("Unauthorized");
+        }
+        env.storage().instance().set(&DataKey::GovernanceToken, &token);
+        env.events().publish((symbol_short!("GovToken"), symbol_short!("set")), token);
+    }
+
+    /// Read the governance token address if set.
+    pub fn get_governance_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::GovernanceToken)
     }
 
     // ── Contract Upgrade ──────────────────────
