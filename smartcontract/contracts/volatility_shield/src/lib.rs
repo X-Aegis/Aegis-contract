@@ -176,10 +176,15 @@ impl VolatilityShield {
 
         let total_shares = Self::total_shares(&env);
         let total_assets = Self::total_assets(&env);
-        Self::set_total_shares(env.clone(), total_shares.checked_add(shares_to_mint).unwrap());
-        Self::set_total_assets(env.clone(), total_assets.checked_add(amount).unwrap());
+        let new_total_shares = total_shares.checked_add(shares_to_mint).unwrap();
+        let new_total_assets = total_assets.checked_add(amount).unwrap();
+        Self::set_total_shares(env.clone(), new_total_shares);
+        Self::set_total_assets(env.clone(), new_total_assets);
 
-        env.events().publish((symbol_short!("Deposit"), from.clone()), amount);
+        env.events().publish(
+            (symbol_short!("Deposit"), from.clone()),
+            (amount, shares_to_mint, new_total_assets, new_total_shares)
+        );
     }
 
     // ── Withdraw ──────────────────────────────
@@ -202,8 +207,11 @@ impl VolatilityShield {
         let total_shares = Self::total_shares(&env);
         let total_assets = Self::total_assets(&env);
 
-        Self::set_total_shares(env.clone(), total_shares.checked_sub(shares).unwrap());
-        Self::set_total_assets(env.clone(), total_assets.checked_sub(assets_to_withdraw).unwrap());
+        let new_total_shares = total_shares.checked_sub(shares).unwrap();
+        let new_total_assets = total_assets.checked_sub(assets_to_withdraw).unwrap();
+
+        Self::set_total_shares(env.clone(), new_total_shares);
+        Self::set_total_assets(env.clone(), new_total_assets);
         env.storage().persistent().set(&balance_key, &(current_balance.checked_sub(shares).unwrap()));
 
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).expect("Token not initialized");
@@ -220,7 +228,10 @@ impl VolatilityShield {
             env.events().publish((symbol_short!("Fee"), symbol_short!("collect")), fee);
         }
 
-    env.events().publish((symbol_short!("Withdraw"), from.clone()), shares);
+        env.events().publish(
+            (symbol_short!("Withdraw"), from.clone()),
+            (shares, net_assets, fee, new_total_assets, new_total_shares)
+        );
   }
 
   // ── Withdrawal Queue ───────────────────────
@@ -404,6 +415,8 @@ impl VolatilityShield {
                 token_client.transfer(&strategy_addr, &vault, &diff);
             }
         }
+        
+        env.events().publish((symbol_short!("Rebalance"),), allocations);
     }
 
     // ── Strategy Management ───────────────────
@@ -577,7 +590,8 @@ impl VolatilityShield {
             Self::set_total_assets(env.clone(), current_assets.checked_add(total_yield).unwrap());
         }
 
-        env.events().publish((symbol_short!("harvest"),), total_yield);
+        let final_assets = Self::total_assets(&env);
+        env.events().publish((symbol_short!("harvest"),), (total_yield, final_assets));
         Ok(total_yield)
     }
 
