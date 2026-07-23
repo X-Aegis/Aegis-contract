@@ -162,7 +162,8 @@ jobs:
 
           INSTRUCTIONS:
           If the diff successfully and safely implements the requirements described in the issue, you must output "PASS" on the first line, followed by a short, friendly, and casual approval comment thanking the contributor for their work (write exactly what you want the maintainer to comment, without quotes or prefixes).
-          If the diff is flawed, misses key requirements, or introduces obvious bugs, you must output "FAIL" on the first line, followed by a polite, constructive explanation of what the contributor needs to fix.`;
+          If the diff is flawed, misses key requirements, or introduces obvious bugs, you must output "FAIL" on the first line, followed by a polite, constructive explanation of what the contributor needs to fix.
+          CRITICAL: Act as the human core maintainer. Do NOT mention that you are an AI, bot, or automated system. Use a friendly, professional human tone.`;
 
           async function run() {
             try {
@@ -205,7 +206,7 @@ jobs:
                 console.log("🚫 AI Review Result: FAIL");
                 const feedback = responseText.replace(/^FAIL\s*/i, '').trim();
                 console.log(`   AI feedback: "${feedback.substring(0, 100)}..."`);
-                const comment = `🤖 **AI Review Failed**\n\nI reviewed your code against the linked issue, and it looks like it needs some adjustments before we can merge it:\n\n> ${feedback.split('\n').join('\n> ')}`;
+                const comment = `**Review against issue body failed**\n\nHey, thanks for the PR! I just reviewed your code against the linked issue, and it looks like it needs some adjustments before we can merge it:\n\n> ${feedback.split('\n').join('\n> ')}`;
 
                 fs.writeFileSync('feedback.txt', comment);
                 execSync(`gh pr comment ${prNumber} --body-file feedback.txt`);
