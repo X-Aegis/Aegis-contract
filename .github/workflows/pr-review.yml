@@ -15,7 +15,7 @@ permissions:
 jobs:
   audit:
     name: Institutional PR Audit
-    if: (github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request)) && github.actor != 'bbkenny' && github.actor != 'github-actions[bot]'
+    if: (github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request)) && github.actor != 'bbkenny' && !endsWith(github.actor, '[bot]')
     runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.MAINTAINER_TOKEN != '' && secrets.MAINTAINER_TOKEN || secrets.GITHUB_TOKEN }}
