@@ -2,7 +2,9 @@ name: Protocol Liaison (PR Reviewer)
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
+  issue_comment:
+    types: [created]
     paths-ignore:
       - '.github/workflows/**'
 
@@ -13,55 +15,55 @@ permissions:
 jobs:
   audit:
     name: Institutional PR Audit
+    if: (github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request)) && github.actor != 'bbkenny' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     env:
-      # We use MAINTAINER_TOKEN if available, otherwise fallback to GITHUB_TOKEN.
-      # MAINTAINER_TOKEN makes all actions (comments, approvals, merges) appear as bbkenny.
       GITHUB_TOKEN: ${{ secrets.MAINTAINER_TOKEN != '' && secrets.MAINTAINER_TOKEN || secrets.GITHUB_TOKEN }}
+      PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || github.event.issue.number }}
+      AUTHOR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.user.login || github.event.comment.user.login }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          # Required for pull_request_target to checkout fork PR code.
-          # Safe because we only read the diff/run tests, not execute arbitrary code.
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
           allow-unsafe-pr-checkout: true
 
       - name: 🔍 Check for Issue Link
         run: |
-          PR_BODY=$(gh pr view ${{ github.event.pull_request.number }} --json body -q .body)
+          PR_BODY=$(gh pr view $PR_NUMBER --json body -q .body)
           if ! echo "$PR_BODY" | grep -Eiq "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+"; then
             RESPONSES=(
-              "hey @${{ github.event.pull_request.user.login }}! i noticed you didn't link an issue in your PR description. please add \`Closes #ISSUE_NUMBER\` so we can close it when merged!"
-              "Thanks for the PR @${{ github.event.pull_request.user.login }}! Could you please link the issue it resolves using \`Closes #ISSUE_NUMBER\` in the description? It helps us track things better."
-              "Hey @${{ github.event.pull_request.user.login }}, looks like the PR description is missing an issue link. Just drop a \`Closes #123\` in there so we can link them up!"
-              "Awesome start @${{ github.event.pull_request.user.login }}, but could you add a closing keyword like \`Closes #ISSUE\` to the PR body? That way GitHub will close the issue for us."
-              "I'd love to review this @${{ github.event.pull_request.user.login }}, but we need an issue linked first! Please update the description with \`Closes #ISSUE_NUMBER\`."
-              "Hey @${{ github.event.pull_request.user.login }}, before we proceed, please link the related issue in the description (e.g., \`Fixes #41\`). Thanks!"
+              "hey @${{ env.AUTHOR }}! i noticed you didn't link an issue in your PR description. please add \`Closes #ISSUE_NUMBER\` so we can close it when merged!"
+              "Thanks for the PR @${{ env.AUTHOR }}! Could you please link the issue it resolves using \`Closes #ISSUE_NUMBER\` in the description? It helps us track things better."
+              "Hey @${{ env.AUTHOR }}, looks like the PR description is missing an issue link. Just drop a \`Closes #123\` in there so we can link them up!"
+              "Awesome start @${{ env.AUTHOR }}, but could you add a closing keyword like \`Closes #ISSUE\` to the PR body? That way GitHub will close the issue for us."
+              "I'd love to review this @${{ env.AUTHOR }}, but we need an issue linked first! Please update the description with \`Closes #ISSUE_NUMBER\`."
+              "Hey @${{ env.AUTHOR }}, before we proceed, please link the related issue in the description (e.g., \`Fixes #41\`). Thanks!"
             )
             SELECTED=$(shuf -n1 -e "${RESPONSES[@]}")
-            gh pr comment ${{ github.event.pull_request.number }} --body "$SELECTED"
+            gh pr comment $PR_NUMBER --body "$SELECTED"
             exit 1
           fi
 
       - name: 🚨 Check for Merge Conflicts
         run: |
-          MERGEABLE=$(gh pr view ${{ github.event.pull_request.number }} --json mergeable -q .mergeable)
+          MERGEABLE=$(gh pr view $PR_NUMBER --json mergeable -q .mergeable)
           if [ "$MERGEABLE" == "CONFLICTING" ]; then
             RESPONSES=(
-              "hey @${{ github.event.pull_request.user.login }}, it looks like there are merge conflicts with the \`main\` branch. could you pull the latest changes and resolve them so i can run my tests?"
-              "Hi @${{ github.event.pull_request.user.login }}! This PR currently has merge conflicts with \`main\`. Please rebase or merge the latest changes so we can proceed with the review."
-              "Looks like some conflicts popped up with the base branch @${{ github.event.pull_request.user.login }}! Once you resolve them, the automated checks will kick off again."
-              "Hey @${{ github.event.pull_request.user.login }}, we can't merge this yet because of conflicts with \`main\`. Mind taking a look and fixing them up?"
-              "Merge conflicts detected @${{ github.event.pull_request.user.login }}! Please sync your branch with \`main\` and resolve the conflicts so we can get this reviewed."
-              "HI @${{ github.event.pull_request.user.login }}, looks like someone else merged changes that conflict with yours. Please resolve the conflicts and push an update!"
+              "hey @${{ env.AUTHOR }}, it looks like there are merge conflicts with the \`main\` branch. could you pull the latest changes and resolve them so i can run my tests?"
+              "Hi @${{ env.AUTHOR }}! This PR currently has merge conflicts with \`main\`. Please rebase or merge the latest changes so we can proceed with the review."
+              "Looks like some conflicts popped up with the base branch @${{ env.AUTHOR }}! Once you resolve them, the automated checks will kick off again."
+              "Hey @${{ env.AUTHOR }}, we can't merge this yet because of conflicts with \`main\`. Mind taking a look and fixing them up?"
+              "Merge conflicts detected @${{ env.AUTHOR }}! Please sync your branch with \`main\` and resolve the conflicts so we can get this reviewed."
+              "HI @${{ env.AUTHOR }}, looks like someone else merged changes that conflict with yours. Please resolve the conflicts and push an update!"
             )
             SELECTED=$(shuf -n1 -e "${RESPONSES[@]}")
-            gh pr comment ${{ github.event.pull_request.number }} --body "$SELECTED"
+            gh pr comment $PR_NUMBER --body "$SELECTED"
             exit 1
           fi
 
       - name: Install Rust
+        if: github.event_name == 'pull_request_target'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -70,6 +72,7 @@ jobs:
 
       - name: Lint with Clippy
         id: lint_review
+        if: github.event_name == 'pull_request_target'
         continue-on-error: true
         run: |
           cd smartcontract
@@ -77,40 +80,39 @@ jobs:
 
       - name: Review Core Logic
         id: build_review
+        if: github.event_name == 'pull_request_target'
         continue-on-error: true
         run: |
           cd smartcontract
           cargo test --all && cargo build --target wasm32-unknown-unknown --release
 
       - name: ❌ Handle Lint Failure
-        if: steps.lint_review.outcome == 'failure'
+        if: github.event_name == 'pull_request_target' && steps.lint_review.outcome == 'failure'
         run: |
-          PR_TITLE=$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title)
-          gh pr comment ${{ github.event.pull_request.number }} --body "Hey @${{ github.event.pull_request.user.login }}, the linter (\`cargo clippy\`) flagged some warnings in '$PR_TITLE'. Please run \`cargo clippy --all-targets --all-features -- -D warnings\` locally and fix the issues before pushing again."
+          PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
+          gh pr comment $PR_NUMBER --body "Hey @${{ env.AUTHOR }}, the linter (\`cargo clippy\`) flagged some warnings in '$PR_TITLE'. Please run \`cargo clippy --all-targets --all-features -- -D warnings\` locally and fix the issues before pushing again."
 
       - name: ❌ Handle Review Failure
-        if: steps.build_review.outcome == 'failure'
+        if: github.event_name == 'pull_request_target' && steps.build_review.outcome == 'failure'
         run: |
-          PR_TITLE=$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title)
+          PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
           RESPONSES=(
-            "hey @${{ github.event.pull_request.user.login }}, took a look at the PR for '$PR_TITLE'. actually, it looks like the CI checks (tests/build) are failing right now. mind checking the logs and fixing the errors? once it's passing, just push an update and we can get it merged."
-            "Thanks for submitting '$PR_TITLE' @${{ github.event.pull_request.user.login }}! Unfortunately, the automated checks failed. Please review the Actions logs to see what went wrong and push a fix."
-            "Hey @${{ github.event.pull_request.user.login }}! The build/tests are currently failing for '$PR_TITLE'. Could you take a look at the workflow logs and patch up the errors?"
-            "Looks like there are some failing checks on '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Once you get the tests passing, let us know by pushing the fixes!"
-            "We're almost there with '$PR_TITLE' @${{ github.event.pull_request.user.login }}, but the CI pipeline is red. Check the logs for details and push an update when you have it fixed!"
-            "Hey @${{ github.event.pull_request.user.login }}, the automated tests didn't pass for '$PR_TITLE'. Mind taking a look at the errors and fixing them up?"
+            "hey @${{ env.AUTHOR }}, took a look at the PR for '$PR_TITLE'. actually, it looks like the CI checks (tests/build) are failing right now. mind checking the logs and fixing the errors? once it's passing, just push an update and we can get it merged."
+            "Thanks for submitting '$PR_TITLE' @${{ env.AUTHOR }}! Unfortunately, the automated checks failed. Please review the Actions logs to see what went wrong and push a fix."
+            "Hey @${{ env.AUTHOR }}! The build/tests are currently failing for '$PR_TITLE'. Could you take a look at the workflow logs and patch up the errors?"
+            "Looks like there are some failing checks on '$PR_TITLE' @${{ env.AUTHOR }}. Once you get the tests passing, let us know by pushing the fixes!"
+            "We're almost there with '$PR_TITLE' @${{ env.AUTHOR }}, but the CI pipeline is red. Check the logs for details and push an update when you have it fixed!"
+            "Hey @${{ env.AUTHOR }}, the automated tests didn't pass for '$PR_TITLE'. Mind taking a look at the errors and fixing them up?"
           )
           SELECTED=$(shuf -n1 -e "${RESPONSES[@]}")
-          gh pr comment ${{ github.event.pull_request.number }} --body "$SELECTED"
+          gh pr comment $PR_NUMBER --body "$SELECTED"
           exit 1
 
       - name: 🤖 AI Code Review (Claude)
         id: ai_review
-        if: steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success'
+        if: (github.event_name == 'pull_request_target' && steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success') || github.event_name == 'issue_comment'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           echo "═══════════════════════════════════════════"
           echo "🤖 AI REVIEW: Starting Claude Code Review"
@@ -247,22 +249,22 @@ jobs:
           node ai_review.js
 
       - name: ✅ Handle Review Success
-        if: steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success'
+        if: (github.event_name == 'pull_request_target' && steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success') || github.event_name == 'issue_comment'
         run: |
-          PR_TITLE=$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title)
-          PR_NUMBER=${{ github.event.pull_request.number }}
+          PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
+          PR_NUMBER=$PR_NUMBER
           OWNER="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
 
           # Create an array of dynamic responses
           RESPONSES=(
-            "hey @${{ github.event.pull_request.user.login }}, just went through the changes for '$PR_TITLE'. logic looks really solid and the tests passed perfectly. going ahead and approving + merging this into main now, thanks for the contribution!"
-            "Awesome work on '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Tests are completely green, so I'm approving this!"
-            "Everything looks perfect for '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Thanks for the contribution, approved and merging!"
-            "Solid implementation on '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Tests passed, approving and merging now."
-            "Great job here on '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Logic is sound and tests are passing. Approved!"
-            "Looks good to me @${{ github.event.pull_request.user.login }}! '$PR_TITLE' passed all checks. Merging this in, thanks!"
-            "Love the changes in '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Spot on! Approved and merging."
+            "hey @${{ env.AUTHOR }}, just went through the changes for '$PR_TITLE'. logic looks really solid and the tests passed perfectly. going ahead and approving + merging this into main now, thanks for the contribution!"
+            "Awesome work on '$PR_TITLE' @${{ env.AUTHOR }}. Tests are completely green, so I'm approving this!"
+            "Everything looks perfect for '$PR_TITLE' @${{ env.AUTHOR }}. Thanks for the contribution, approved and merging!"
+            "Solid implementation on '$PR_TITLE' @${{ env.AUTHOR }}. Tests passed, approving and merging now."
+            "Great job here on '$PR_TITLE' @${{ env.AUTHOR }}. Logic is sound and tests are passing. Approved!"
+            "Looks good to me @${{ env.AUTHOR }}! '$PR_TITLE' passed all checks. Merging this in, thanks!"
+            "Love the changes in '$PR_TITLE' @${{ env.AUTHOR }}. Spot on! Approved and merging."
           )
 
           if [ -f ai_approval.txt ]; then
