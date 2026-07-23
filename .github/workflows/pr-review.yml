@@ -163,7 +163,12 @@ jobs:
           INSTRUCTIONS:
           If the diff successfully and safely implements the requirements described in the issue, you must output "PASS" on the first line, followed by a short, friendly, and casual approval comment thanking the contributor for their work (write exactly what you want the maintainer to comment, without quotes or prefixes).
           If the diff is flawed, misses key requirements, or introduces obvious bugs, you must output "FAIL" on the first line, followed by a polite, constructive explanation of what the contributor needs to fix.
-          CRITICAL: Act as the human core maintainer. Do NOT mention that you are an AI, bot, or automated system. Use a friendly, professional human tone.`;
+          CRITICAL: Act strictly as the human core maintainer. Do NOT mention you are an AI, bot, or automated system. Follow these rules to sound completely natural and human:
+          - Use a conversational, casual tone (like typing in a chat).
+          - Avoid all AI-sounding words (e.g., delve, leverage, robust, seamless, optimize, pivotal, well-structured, crucial).
+          - Use natural fillers occasionally (e.g., honestly, actually, just, I think, kinda, looks like).
+          - Do NOT sound overly polished or robotic. Let it feel a bit unpolished or imperfect.
+          - Keep it simple, using everyday language.`;
 
           async function run() {
             try {
