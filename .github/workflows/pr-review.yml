@@ -166,8 +166,12 @@ jobs:
 
           async function run() {
             try {
-              console.log('🌐 Calling Anthropic API (model: claude-sonnet-4-20250514)...');
-              const res = await fetch('https://api.anthropic.com/v1/messages', {
+              // To switch back to Anthropic, uncomment the following two lines and comment out the AgentRouter ones:
+              // console.log('🌐 Calling Anthropic API...');
+              // const res = await fetch('https://api.anthropic.com/v1/messages', {
+              
+              console.log('🌐 Calling AgentRouter API (model: claude-opus-4-8)...');
+              const res = await fetch('https://agentrouter.org/v1/messages', {
                 method: 'POST',
                 headers: {
                   'content-type': 'application/json',
@@ -175,7 +179,8 @@ jobs:
                   'anthropic-version': '2023-06-01'
                 },
                 body: JSON.stringify({
-                  model: 'claude-3-5-haiku-20241022',
+                  // To switch back to Anthropic, use: model: 'claude-3-5-haiku-20241022',
+                  model: 'claude-opus-4-8',
                   max_tokens: 1500,
                   messages: [{role: 'user', content: prompt}]
                 })
