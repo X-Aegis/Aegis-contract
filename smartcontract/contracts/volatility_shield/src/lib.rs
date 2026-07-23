@@ -1043,4 +1043,17 @@ impl VolatilityShield {
 
         Ok(next_nonce)
     }
+
+    // ── Contract Upgrade ──────────────────────
+    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
+        caller.require_auth();
+        let admin = Self::get_admin(&env);
+        if caller != admin {
+            panic!("Unauthorized");
+        }
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
 }
+
+#[cfg(test)]
+mod test;

@@ -16,7 +16,7 @@ fn create_token_contract<'a>(env: &Env, admin: &Address) -> (Address, StellarAss
 #[test]
 fn test_init_stores_roles() {
     let env         = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client      = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin  = Address::generate(&env);
@@ -36,7 +36,7 @@ fn test_init_stores_roles() {
 #[test]
 fn test_convert_to_assets() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -67,7 +67,7 @@ fn test_convert_to_assets() {
 #[should_panic(expected = "negative amount")]
 fn test_convert_to_assets_negative() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     client.convert_to_assets(&-1);
 }
@@ -75,7 +75,7 @@ fn test_convert_to_assets_negative() {
 #[test]
 fn test_convert_to_shares() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -107,7 +107,7 @@ fn test_strategy_registry() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -135,7 +135,7 @@ fn test_strategy_registry() {
 #[should_panic(expected = "negative amount")]
 fn test_convert_to_shares_negative() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     client.convert_to_shares(&-1);
 }
@@ -143,7 +143,7 @@ fn test_convert_to_shares_negative() {
 #[test]
 fn test_take_fees() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -161,7 +161,7 @@ fn test_take_fees() {
 #[test]
 fn test_set_and_get_benchmark_rate() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -179,7 +179,7 @@ fn test_set_and_get_benchmark_rate() {
 #[test]
 fn test_set_and_get_current_vault_apy() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -198,7 +198,7 @@ fn test_set_and_get_current_vault_apy() {
 #[should_panic]
 fn test_benchmark_setter_requires_admin() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let other = Address::generate(&env);
@@ -214,7 +214,7 @@ fn test_benchmark_setter_requires_admin() {
 #[test]
 fn test_take_fees_dynamic_outperform() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -237,7 +237,7 @@ fn test_take_fees_dynamic_outperform() {
 #[test]
 fn test_take_fees_dynamic_underperform() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -260,7 +260,7 @@ fn test_take_fees_dynamic_underperform() {
 #[test]
 fn test_take_fees_falls_back_to_base_when_no_benchmark() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -279,7 +279,7 @@ fn test_take_fees_falls_back_to_base_when_no_benchmark() {
 #[test]
 fn test_take_fees_extreme_outperformance_capped() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -300,7 +300,7 @@ fn test_take_fees_extreme_outperformance_capped() {
 #[test]
 fn test_take_fees_zero_fee_always_zero() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -325,7 +325,7 @@ fn test_withdraw_success() {
     let token_admin = Address::generate(&env);
     let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
     
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     
     let admin = Address::generate(&env);
@@ -355,7 +355,7 @@ fn test_rebalance_admin_auth_accepted() {
     let env         = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client      = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin  = Address::generate(&env);
@@ -379,7 +379,7 @@ fn test_oracle_staleness_rejected() {
     let env         = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client      = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin  = Address::generate(&env);
@@ -405,7 +405,7 @@ fn test_oracle_staleness_rejected() {
 fn test_rebalance_invalid_sum() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -428,7 +428,7 @@ fn test_rebalance_invalid_sum() {
 fn test_rebalance_negative_allocation() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -451,7 +451,7 @@ fn test_rebalance_negative_allocation() {
 fn test_rebalance_unlisted_strategy() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
@@ -475,7 +475,7 @@ fn test_flag_strategy_marks_flagged() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -499,7 +499,7 @@ fn test_flag_strategy_emits_event() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -523,7 +523,7 @@ fn test_flag_strategy_not_listed_panics() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -544,7 +544,7 @@ fn test_flag_strategy_non_admin_panics() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -566,7 +566,7 @@ fn test_remove_strategy_delists_strategy() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -575,7 +575,7 @@ fn test_remove_strategy_delists_strategy() {
     let treasury = Address::generate(&env);
 
     // Register mock strategy contract so cross-contract balance() call works
-    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_id = env.register(mock_strategy::MockStrategy, ());
     let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
     mock_client.init(&admin, &asset);
 
@@ -594,7 +594,7 @@ fn test_remove_strategy_withdraws_funds_first() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -602,7 +602,7 @@ fn test_remove_strategy_withdraws_funds_first() {
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_id = env.register(mock_strategy::MockStrategy, ());
     let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
     mock_client.init(&admin, &asset);
 
@@ -629,7 +629,7 @@ fn test_remove_strategy_emits_event() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -637,7 +637,7 @@ fn test_remove_strategy_emits_event() {
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_id = env.register(mock_strategy::MockStrategy, ());
     let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
     mock_client.init(&admin, &asset);
 
@@ -655,7 +655,7 @@ fn test_remove_strategy_not_listed_panics() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -674,7 +674,7 @@ fn test_check_strategy_health_healthy_strategy() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -682,7 +682,7 @@ fn test_check_strategy_health_healthy_strategy() {
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_id = env.register(mock_strategy::MockStrategy, ());
     let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
     mock_client.init(&admin, &asset);
     mock_client.set_balance(&1000i128);
@@ -703,7 +703,7 @@ fn test_check_strategy_health_flags_dropped_to_zero() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -711,7 +711,7 @@ fn test_check_strategy_health_flags_dropped_to_zero() {
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
 
-    let mock_id = env.register_contract(None, mock_strategy::MockStrategy);
+    let mock_id = env.register(mock_strategy::MockStrategy, ());
     let mock_client = mock_strategy::MockStrategyClient::new(&env, &mock_id);
     mock_client.init(&admin, &asset);
 
@@ -740,7 +740,7 @@ fn test_get_strategy_health_default_zero() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -809,7 +809,7 @@ fn setup_vault<'a>(
     let token_admin = Address::generate(env);
     let (token_id, sac, tc) = create_token_contract(env, &token_admin);
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(env, &contract_id);
 
     let admin = Address::generate(env);
@@ -822,13 +822,13 @@ fn setup_vault<'a>(
 
 /// Register + initialize a mock provider charging `fee_bps`, funded with
 /// `funding` of the token so it can lend.
-fn setup_provider<'a>(
-    env: &'a Env,
+fn setup_provider(
+    env: &Env,
     sac: &StellarAssetClient,
     fee_bps: u32,
     funding: i128,
 ) -> Address {
-    let provider_id = env.register_contract(None, MockFlashLoanProvider);
+    let provider_id = env.register(MockFlashLoanProvider, ());
     MockFlashLoanProviderClient::new(env, &provider_id).init(&fee_bps);
     sac.mint(&provider_id, &funding);
     provider_id
@@ -1015,7 +1015,7 @@ fn test_queue_withdraw_above_threshold() {
     let admin = Address::generate(&env);
     sac.mint(&admin, &100_000_000_000_000i128);
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let oracle = Address::generate(&env);
@@ -1048,7 +1048,7 @@ fn test_queue_withdraw_below_threshold_rejected() {
     let admin = Address::generate(&env);
     sac.mint(&admin, &100_000_000_000_000i128);
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let oracle = Address::generate(&env);
@@ -1077,7 +1077,7 @@ fn test_queue_withdraw_default_threshold() {
     let admin = Address::generate(&env);
     sac.mint(&admin, &100_000_000_000_000i128);
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let oracle = Address::generate(&env);
@@ -1104,7 +1104,7 @@ fn test_queue_withdraw_insufficient_shares_rejected() {
     let admin = Address::generate(&env);
     sac.mint(&admin, &100_000_000_000_000i128);
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let oracle = Address::generate(&env);
@@ -1129,10 +1129,10 @@ fn test_set_and_get_queue_threshold() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
 
-    let (token, sac, _tc) = create_token_contract(&env, &Address::generate(&env));
+    let (token, _sac, _tc) = create_token_contract(&env, &Address::generate(&env));
     let admin = Address::generate(&env);
 
-    let contract_id = env.register_contract(None, VolatilityShield);
+    let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
 
     let oracle = Address::generate(&env);
@@ -1144,4 +1144,33 @@ fn test_set_and_get_queue_threshold() {
 
     client.set_withdraw_queue_threshold(&admin, &1000);
     assert_eq!(client.get_withdraw_queue_threshold(), 1000);
+}
+
+#[test]
+fn test_upgrade() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    client.init(&admin, &asset, &oracle, &treasury, &500u32);
+    client.set_total_shares(&1000);
+    client.set_total_assets(&5000);
+
+    // Provide a valid WASM module to satisfy Soroban validation
+    let wasm = soroban_sdk::Bytes::from_slice(&env, include_bytes!("../test_snapshots/dummy.wasm"));
+    let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
+    
+    client.upgrade(&admin, &new_wasm_hash);
+
+    // Assert that state persists
+    assert_eq!(client.total_shares(), 1000);
+    assert_eq!(client.total_assets(), 5000);
+    assert_eq!(client.fee_percentage(), 500);
 }
