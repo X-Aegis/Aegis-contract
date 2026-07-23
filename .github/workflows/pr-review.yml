@@ -32,12 +32,12 @@ jobs:
           PR_BODY=$(gh pr view ${{ github.event.pull_request.number }} --json body -q .body)
           if ! echo "$PR_BODY" | grep -Eiq "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+"; then
             RESPONSES=(
-              "hey! i noticed you didn't link an issue in your PR description. please add \`Closes #ISSUE_NUMBER\` so we can close it when merged!"
-              "Thanks for the PR! Could you please link the issue it resolves using \`Closes #ISSUE_NUMBER\` in the description? It helps us track things better."
-              "Hey there, looks like the PR description is missing an issue link. Just drop a \`Closes #123\` in there so we can link them up!"
-              "Awesome start, but could you add a closing keyword like \`Closes #ISSUE\` to the PR body? That way GitHub will close the issue for us."
-              "I'd love to review this, but we need an issue linked first! Please update the description with \`Closes #ISSUE_NUMBER\`."
-              "Hey, before we proceed, please link the related issue in the description (e.g., \`Fixes #41\`). Thanks!"
+              "hey @${{ github.event.pull_request.user.login }}! i noticed you didn't link an issue in your PR description. please add \`Closes #ISSUE_NUMBER\` so we can close it when merged!"
+              "Thanks for the PR @${{ github.event.pull_request.user.login }}! Could you please link the issue it resolves using \`Closes #ISSUE_NUMBER\` in the description? It helps us track things better."
+              "Hey @${{ github.event.pull_request.user.login }}, looks like the PR description is missing an issue link. Just drop a \`Closes #123\` in there so we can link them up!"
+              "Awesome start @${{ github.event.pull_request.user.login }}, but could you add a closing keyword like \`Closes #ISSUE\` to the PR body? That way GitHub will close the issue for us."
+              "I'd love to review this @${{ github.event.pull_request.user.login }}, but we need an issue linked first! Please update the description with \`Closes #ISSUE_NUMBER\`."
+              "Hey @${{ github.event.pull_request.user.login }}, before we proceed, please link the related issue in the description (e.g., \`Fixes #41\`). Thanks!"
             )
             SELECTED=$(shuf -n1 -e "${RESPONSES[@]}")
             gh pr comment ${{ github.event.pull_request.number }} --body "$SELECTED"
@@ -49,12 +49,12 @@ jobs:
           MERGEABLE=$(gh pr view ${{ github.event.pull_request.number }} --json mergeable -q .mergeable)
           if [ "$MERGEABLE" == "CONFLICTING" ]; then
             RESPONSES=(
-              "hey, it looks like there are merge conflicts with the \`main\` branch. could you pull the latest changes and resolve them so i can run my tests?"
-              "Hi! This PR currently has merge conflicts with \`main\`. Please rebase or merge the latest changes so we can proceed with the review."
-              "Looks like some conflicts popped up with the base branch! Once you resolve them, the automated checks will kick off again."
-              "Hey there, we can can't merge this yet because of conflicts with \`main\`. Mind taking a look and fixing them up?"
-              "Merge conflicts detected! Please sync your branch with \`main\` and resolve the conflicts so we can get this reviewed."
-              "HI, looks like someone else merged changes that conflict with yours. Please resolve the conflicts and push an update!"
+              "hey @${{ github.event.pull_request.user.login }}, it looks like there are merge conflicts with the \`main\` branch. could you pull the latest changes and resolve them so i can run my tests?"
+              "Hi @${{ github.event.pull_request.user.login }}! This PR currently has merge conflicts with \`main\`. Please rebase or merge the latest changes so we can proceed with the review."
+              "Looks like some conflicts popped up with the base branch @${{ github.event.pull_request.user.login }}! Once you resolve them, the automated checks will kick off again."
+              "Hey @${{ github.event.pull_request.user.login }}, we can't merge this yet because of conflicts with \`main\`. Mind taking a look and fixing them up?"
+              "Merge conflicts detected @${{ github.event.pull_request.user.login }}! Please sync your branch with \`main\` and resolve the conflicts so we can get this reviewed."
+              "HI @${{ github.event.pull_request.user.login }}, looks like someone else merged changes that conflict with yours. Please resolve the conflicts and push an update!"
             )
             SELECTED=$(shuf -n1 -e "${RESPONSES[@]}")
             gh pr comment ${{ github.event.pull_request.number }} --body "$SELECTED"
@@ -86,19 +86,19 @@ jobs:
         if: steps.lint_review.outcome == 'failure'
         run: |
           PR_TITLE=$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title)
-          gh pr comment ${{ github.event.pull_request.number }} --body "Hey, the linter (\`cargo clippy\`) flagged some warnings in '$PR_TITLE'. Please run \`cargo clippy --all-targets --all-features -- -D warnings\` locally and fix the issues before pushing again."
+          gh pr comment ${{ github.event.pull_request.number }} --body "Hey @${{ github.event.pull_request.user.login }}, the linter (\`cargo clippy\`) flagged some warnings in '$PR_TITLE'. Please run \`cargo clippy --all-targets --all-features -- -D warnings\` locally and fix the issues before pushing again."
 
       - name: ❌ Handle Review Failure
         if: steps.build_review.outcome == 'failure'
         run: |
           PR_TITLE=$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title)
           RESPONSES=(
-            "hey, took a look at the PR for '$PR_TITLE'. actually, it looks like the CI checks (tests/build) are failing right now. mind checking the logs and fixing the errors? once it's passing, just push an update and we can get it merged."
-            "Thanks for submitting '$PR_TITLE'! Unfortunately, the automated checks failed. Please review the Actions logs to see what went wrong and push a fix."
-            "Hey! The build/tests are currently failing for '$PR_TITLE'. Could you take a look at the workflow logs and patch up the errors?"
-            "Looks like there are some failing checks on '$PR_TITLE'. Once you get the tests passing, let us know by pushing the fixes!"
-            "We're almost there with '$PR_TITLE', but the CI pipeline is red. Check the logs for details and push an update when you have it fixed!"
-            "Hey there, the automated tests didn't pass for '$PR_TITLE'. Mind taking a look at the errors and fixing them up?"
+            "hey @${{ github.event.pull_request.user.login }}, took a look at the PR for '$PR_TITLE'. actually, it looks like the CI checks (tests/build) are failing right now. mind checking the logs and fixing the errors? once it's passing, just push an update and we can get it merged."
+            "Thanks for submitting '$PR_TITLE' @${{ github.event.pull_request.user.login }}! Unfortunately, the automated checks failed. Please review the Actions logs to see what went wrong and push a fix."
+            "Hey @${{ github.event.pull_request.user.login }}! The build/tests are currently failing for '$PR_TITLE'. Could you take a look at the workflow logs and patch up the errors?"
+            "Looks like there are some failing checks on '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Once you get the tests passing, let us know by pushing the fixes!"
+            "We're almost there with '$PR_TITLE' @${{ github.event.pull_request.user.login }}, but the CI pipeline is red. Check the logs for details and push an update when you have it fixed!"
+            "Hey @${{ github.event.pull_request.user.login }}, the automated tests didn't pass for '$PR_TITLE'. Mind taking a look at the errors and fixing them up?"
           )
           SELECTED=$(shuf -n1 -e "${RESPONSES[@]}")
           gh pr comment ${{ github.event.pull_request.number }} --body "$SELECTED"
@@ -110,6 +110,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           echo "═══════════════════════════════════════════"
           echo "🤖 AI REVIEW: Starting Claude Code Review"
@@ -155,6 +156,7 @@ jobs:
           const prComments = fs.existsSync('pr_comments.txt') ? fs.readFileSync('pr_comments.txt', 'utf8') : '';
           const prNumber = process.env.PR_NUMBER;
           const apiKey = process.env.ANTHROPIC_API_KEY;
+          const author = process.env.AUTHOR;
 
           const prompt = `You are an expert Senior Developer reviewing a Pull Request.
           Your task is to verify if the PR successfully solves the requirements of the linked Issue.
@@ -176,6 +178,7 @@ jobs:
           If the diff is flawed, misses key requirements, introduces obvious bugs, OR if the contributor asks an architectural/blocking question that requires your input before merging, you must output "FAIL" on the first line, followed by a polite, constructive explanation or answer.
           IMPORTANT: If the contributor asks a non-blocking question in the description or comments, you can still output "PASS", but you MUST answer their question conversationally within your approval comment!
           CRITICAL: Act strictly as the human core maintainer. Do NOT mention you are an AI, bot, or automated system. Follow these rules to sound completely natural and human:
+          - You MUST start your response by tagging the contributor: @${author}.
           - Use a conversational, casual tone (like typing in a chat).
           - Avoid all AI-sounding words (e.g., delve, leverage, robust, seamless, optimize, pivotal, well-structured, crucial).
           - Use natural fillers occasionally (e.g., honestly, actually, just, I think, kinda, looks like).
@@ -223,7 +226,7 @@ jobs:
                 console.log("🚫 AI Review Result: FAIL");
                 const feedback = responseText.replace(/^FAIL\s*/i, '').trim();
                 console.log(`   AI feedback: "${feedback.substring(0, 100)}..."`);
-                const comment = `**Review against issue body failed**\n\nHey, thanks for the PR! I just reviewed your code against the linked issue, and it looks like it needs some adjustments before we can merge it:\n\n> ${feedback.split('\n').join('\n> ')}`;
+                const comment = `**Review against issue body failed**\n\nHey @${author}, thanks for the PR! I just reviewed your code against the linked issue, and it looks like it needs some adjustments before we can merge it:\n\n> ${feedback.split('\n').join('\n> ')}`;
 
                 fs.writeFileSync('feedback.txt', comment);
                 execSync(`gh pr comment ${prNumber} --body-file feedback.txt`);
@@ -253,13 +256,13 @@ jobs:
 
           # Create an array of dynamic responses
           RESPONSES=(
-            "hey, just went through the changes for '$PR_TITLE'. logic looks really solid and the tests passed perfectly. going ahead and approving + merging this into main now, thanks for the contribution!"
-            "Awesome work on '$PR_TITLE'. Tests are completely green, so I'm approving this!"
-            "Everything looks perfect for '$PR_TITLE'. Thanks for the contribution, approved and merging!"
-            "Solid implementation on '$PR_TITLE'. Tests passed, approving and merging now."
-            "Great job here on '$PR_TITLE'. Logic is sound and tests are passing. Approved!"
-            "Looks good to me! '$PR_TITLE' passed all checks. Merging this in, thanks!"
-            "Love the changes in '$PR_TITLE'. Spot on! Approved and merging."
+            "hey @${{ github.event.pull_request.user.login }}, just went through the changes for '$PR_TITLE'. logic looks really solid and the tests passed perfectly. going ahead and approving + merging this into main now, thanks for the contribution!"
+            "Awesome work on '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Tests are completely green, so I'm approving this!"
+            "Everything looks perfect for '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Thanks for the contribution, approved and merging!"
+            "Solid implementation on '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Tests passed, approving and merging now."
+            "Great job here on '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Logic is sound and tests are passing. Approved!"
+            "Looks good to me @${{ github.event.pull_request.user.login }}! '$PR_TITLE' passed all checks. Merging this in, thanks!"
+            "Love the changes in '$PR_TITLE' @${{ github.event.pull_request.user.login }}. Spot on! Approved and merging."
           )
 
           if [ -f ai_approval.txt ]; then
