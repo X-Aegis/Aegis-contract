@@ -3,6 +3,8 @@ name: Protocol Liaison (PR Reviewer)
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
+    paths-ignore:
+      - '.github/workflows/**'
 
 permissions:
   contents: write
@@ -61,6 +63,14 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Lint with Clippy
+        id: lint_review
+        continue-on-error: true
+        run: |
+          cd smartcontract
+          cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Review Core Logic
         id: build_review
@@ -68,6 +78,12 @@ jobs:
         run: |
           cd smartcontract
           cargo test --all && cargo build --target wasm32-unknown-unknown --release
+
+      - name: ❌ Handle Lint Failure
+        if: steps.lint_review.outcome == 'failure'
+        run: |
+          PR_TITLE=$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title)
+          gh pr comment ${{ github.event.pull_request.number }} --body "Hey, the linter (\`cargo clippy\`) flagged some warnings in '$PR_TITLE'. Please run \`cargo clippy --all-targets --all-features -- -D warnings\` locally and fix the issues before pushing again."
 
       - name: ❌ Handle Review Failure
         if: steps.build_review.outcome == 'failure'
@@ -87,7 +103,7 @@ jobs:
 
       - name: 🤖 AI Code Review (Claude)
         id: ai_review
-        if: steps.build_review.outcome == 'success'
+        if: steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -144,8 +160,8 @@ jobs:
                   'anthropic-version': '2023-06-01'
                 },
                 body: JSON.stringify({
-                  model: 'claude-3-5-haiku-20241022',
-                  max_tokens: 500,
+                  model: 'claude-sonnet-4-20250514',
+                  max_tokens: 1500,
                   messages: [{role: 'user', content: prompt}]
                 })
               });
@@ -186,7 +202,7 @@ jobs:
           node ai_review.js
 
       - name: ✅ Handle Review Success
-        if: steps.build_review.outcome == 'success'
+        if: steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success'
         run: |
           PR_TITLE=$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title)
           PR_NUMBER=${{ github.event.pull_request.number }}
