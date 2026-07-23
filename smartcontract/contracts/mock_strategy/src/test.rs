@@ -18,7 +18,7 @@ fn create_token_contract<'a>(
 #[test]
 fn test_mock_strategy_init() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, MockStrategy);
+    let contract_id = env.register(MockStrategy, ());
     let client = MockStrategyClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -35,7 +35,7 @@ fn test_mock_strategy_init() {
 #[should_panic(expected = "Already initialized")]
 fn test_mock_strategy_already_initialized() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, MockStrategy);
+    let contract_id = env.register(MockStrategy, ());
     let client = MockStrategyClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -51,7 +51,7 @@ fn test_mock_strategy_deposit_and_withdraw() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, MockStrategy);
+    let contract_id = env.register(MockStrategy, ());
     let client = MockStrategyClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -78,7 +78,7 @@ fn test_mock_strategy_deposit_negative() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, MockStrategy);
+    let contract_id = env.register(MockStrategy, ());
     let client = MockStrategyClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -95,7 +95,7 @@ fn test_mock_strategy_withdraw_negative() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, MockStrategy);
+    let contract_id = env.register(MockStrategy, ());
     let client = MockStrategyClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -112,7 +112,7 @@ fn test_mock_strategy_withdraw_insufficient() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, MockStrategy);
+    let contract_id = env.register(MockStrategy, ());
     let client = MockStrategyClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -128,7 +128,7 @@ fn test_mock_strategy_set_balance() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, MockStrategy);
+    let contract_id = env.register(MockStrategy, ());
     let client = MockStrategyClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -151,7 +151,7 @@ fn test_mock_strategy_set_balance_negative() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, MockStrategy);
+    let contract_id = env.register(MockStrategy, ());
     let client = MockStrategyClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);

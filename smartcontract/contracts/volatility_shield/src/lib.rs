@@ -787,7 +787,7 @@ impl VolatilityShield {
 
     // ── Internal Helpers ──────────────────────
     pub fn take_fees(env: &Env, amount: i128) -> (i128, i128) {
-        let fee_pct = Self::effective_fee_pct(&env);
+        let fee_pct = Self::effective_fee_pct(env);
         if fee_pct == 0 { return (amount, 0); }
         let fee = amount.checked_mul(fee_pct as i128).unwrap().checked_div(10000).unwrap();
         (amount - fee, fee)
@@ -798,7 +798,7 @@ impl VolatilityShield {
     /// - Underperforming (apy < benchmark): fee scales down, floored at 0.5× base
     /// - No benchmark data → falls back to base fee
     fn effective_fee_pct(env: &Env) -> u32 {
-        let base = Self::fee_percentage(&env);
+        let base = Self::fee_percentage(env);
         if base == 0 { return 0; }
 
         let vault_apy = env.storage().instance().get(&DataKey::CurrentVaultApy).unwrap_or(0u32);
