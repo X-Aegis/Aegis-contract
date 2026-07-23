@@ -1,0 +1,30 @@
+name: Workflow Protection Alert
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/**'
+
+permissions:
+  pull-requests: write
+
+jobs:
+  warn-workflow-changes:
+    name: Flag Workflow Modifications
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⚠️ Comment on PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.MAINTAINER_TOKEN != '' && secrets.MAINTAINER_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "⚠️ **Workflow Protection Alert**
+          
+          This PR modifies CI/CD workflows inside the \`.github/workflows/\` directory.
+          
+          For security reasons, only the core maintainer can review and merge workflow changes. The automated PR review bot will ignore this Pull Request.
+          
+          If this was unintentional, please revert the workflow file changes from your branch so the automated checks can proceed."
+          
+          # Fail the job to act as a soft block and catch attention
+          exit 1
