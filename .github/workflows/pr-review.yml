@@ -23,6 +23,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          # Required for pull_request_target to checkout fork PR code.
+          # Safe because we only read the diff/run tests, not execute arbitrary code.
+          allow-unsafe-pr-checkout: true
 
       - name: 🔍 Check for Issue Link
         run: |
@@ -108,50 +111,62 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          echo "═══════════════════════════════════════════"
+          echo "🤖 AI REVIEW: Starting Claude Code Review"
+          echo "═══════════════════════════════════════════"
+
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "No ANTHROPIC_API_KEY found, skipping AI review."
+            echo "⚠️ No ANTHROPIC_API_KEY found — skipping AI review."
+            echo "   Add ANTHROPIC_API_KEY to org secrets to enable AI reviews."
             exit 0
           fi
-          
+          echo "✅ ANTHROPIC_API_KEY is set (length: ${#ANTHROPIC_API_KEY} chars)"
+
           PR_BODY=$(gh pr view $PR_NUMBER --json body -q .body)
           ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oEi "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+" | head -n 1 | grep -oE "[0-9]+")
-          
+
           if [ -z "$ISSUE_NUMBER" ]; then
-            echo "No linked issue found for AI context."
+            echo "⚠️ No linked issue found in PR body — skipping AI review."
+            echo "   AI review requires a linked issue (e.g., 'Closes #42') for context."
             exit 0
           fi
-          
-          echo "Fetching context for Issue #$ISSUE_NUMBER..."
+
+          echo "📋 Linked Issue: #$ISSUE_NUMBER"
+          echo "📎 PR Number: #$PR_NUMBER"
+
           ISSUE_BODY=$(gh issue view $ISSUE_NUMBER --json body -q .body)
           PR_DIFF=$(gh pr diff $PR_NUMBER)
-          
+
           echo "$ISSUE_BODY" > issue.txt
           echo "$PR_DIFF" > diff.txt
-          
+          echo "📏 Issue body: $(wc -c < issue.txt) bytes"
+          echo "📏 PR diff: $(wc -c < diff.txt) bytes"
+
           cat << 'EOF' > ai_review.js
           const fs = require('fs');
           const { execSync } = require('child_process');
-          
+
           const issue = fs.readFileSync('issue.txt', 'utf8');
           const diff = fs.readFileSync('diff.txt', 'utf8');
           const prNumber = process.env.PR_NUMBER;
           const apiKey = process.env.ANTHROPIC_API_KEY;
-          
+
           const prompt = `You are an expert Senior Developer reviewing a Pull Request.
           Your task is to verify if the PR successfully solves the requirements of the linked Issue.
-          
+
           LINKED ISSUE DESCRIPTION:
           ${issue}
-          
+
           PULL REQUEST DIFF:
           ${diff}
-          
+
           INSTRUCTIONS:
           If the diff successfully and safely implements the requirements described in the issue, you must output "PASS" on the first line, followed by a short, friendly, and casual approval comment thanking the contributor for their work (write exactly what you want the maintainer to comment, without quotes or prefixes).
           If the diff is flawed, misses key requirements, or introduces obvious bugs, you must output "FAIL" on the first line, followed by a polite, constructive explanation of what the contributor needs to fix.`;
-          
+
           async function run() {
             try {
+              console.log('🌐 Calling Anthropic API (model: claude-sonnet-4-20250514)...');
               const res = await fetch('https://api.anthropic.com/v1/messages', {
                 method: 'POST',
                 headers: {
@@ -165,40 +180,49 @@ jobs:
                   messages: [{role: 'user', content: prompt}]
                 })
               });
-              
+
               if (!res.ok) {
-                console.log("AI API failed with status", res.status);
+                const errorBody = await res.text();
+                console.error(`❌ AI API failed with status ${res.status}`);
+                console.error(`   Response: ${errorBody}`);
+                console.log('⚠️ Falling back to non-AI review flow.');
                 process.exit(0);
               }
-              
+
               const data = await res.json();
+              console.log(`✅ API responded successfully (usage: ${data.usage?.input_tokens} in / ${data.usage?.output_tokens} out tokens)`);
               const responseText = data.content[0].text.trim();
-              
+
               if (responseText.startsWith('PASS')) {
-                console.log("AI Review: PASS");
+                console.log("🎉 AI Review Result: PASS");
                 const approvalMsg = responseText.replace(/^PASS\s*/i, '').trim();
                 if (approvalMsg) {
+                    console.log(`   AI comment: "${approvalMsg.substring(0, 100)}..."`);
                     fs.writeFileSync('ai_approval.txt', approvalMsg);
                 }
                 process.exit(0);
               } else {
-                console.log("AI Review: FAIL");
+                console.log("🚫 AI Review Result: FAIL");
                 const feedback = responseText.replace(/^FAIL\s*/i, '').trim();
+                console.log(`   AI feedback: "${feedback.substring(0, 100)}..."`);
                 const comment = `🤖 **AI Review Failed**\n\nI reviewed your code against the linked issue, and it looks like it needs some adjustments before we can merge it:\n\n> ${feedback.split('\n').join('\n> ')}`;
-                
+
                 fs.writeFileSync('feedback.txt', comment);
                 execSync(`gh pr comment ${prNumber} --body-file feedback.txt`);
                 process.exit(1);
               }
             } catch (err) {
-              console.error("AI Review error:", err);
+              console.error("❌ AI Review encountered an unexpected error:");
+              console.error(`   Error: ${err.message}`);
+              console.error(`   Stack: ${err.stack}`);
+              console.log('⚠️ Falling back to non-AI review flow.');
               process.exit(0);
             }
           }
-          
+
           run();
           EOF
-          
+
           node ai_review.js
 
       - name: ✅ Handle Review Success
@@ -222,8 +246,10 @@ jobs:
 
           if [ -f ai_approval.txt ]; then
             SELECTED_RESPONSE=$(cat ai_approval.txt)
+            echo "🤖 Using AI-generated approval comment."
           else
             SELECTED_RESPONSE=$(shuf -n1 -e "${RESPONSES[@]}")
+            echo "📝 Using random pre-written approval comment (AI review was skipped or unavailable)."
           fi
 
           # 1. Approve the PR with the dynamic comment (This looks like it came from bbkenny!)
