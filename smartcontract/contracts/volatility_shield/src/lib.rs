@@ -1,4 +1,5 @@
 #![no_std]
+#![warn(clippy::all, clippy::pedantic)]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
     Address, Env, Map, Vec,
@@ -13,7 +14,8 @@ use cross_chain::{BridgeEndpoint, CrossChainRebalancePayload, TargetChain};
 // ─────────────────────────────────────────────
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
-/// HealthStatus structure.
+/// Represents the operational health status of a strategy.
+/// Strategies are marked `Flagged` if their reported balance drops unexpectedly.
 pub enum HealthStatus {
     Healthy,
     Flagged,
@@ -25,7 +27,8 @@ pub enum HealthStatus {
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
-/// Error structure.
+/// Error codes returned by the Volatility Shield contract.
+/// Defines specific failure conditions for protocol interactions.
 pub enum Error {
     NotInitialized = 1,
     AlreadyInitialized = 2,
@@ -48,7 +51,8 @@ pub enum Error {
 // ─────────────────────────────────────────────
 #[contracttype]
 #[derive(Clone)]
-/// DataKey structure.
+/// Storage keys used to persist state within the contract.
+/// Each variant corresponds to a unique piece of protocol data.
 pub enum DataKey {
     Admin,
     Asset,
@@ -90,7 +94,8 @@ pub enum DataKey {
 // ─────────────────────────────────────────────
 // Strategy cross-contract client
 // ─────────────────────────────────────────────
-/// StrategyClient structure.
+/// Client wrapper for interacting with registered strategy contracts.
+/// Exposes `deposit`, `withdraw`, and `balance` cross-contract calls.
 pub struct StrategyClient<'a> {
     env: &'a Env,
     address: Address,
@@ -109,12 +114,19 @@ pub struct PendingWithdrawal {
 }
 
 impl<'a> StrategyClient<'a> {
-    /// New function.
+    /// Creates a new `StrategyClient` instance for the given address.
+///
+/// # Arguments
+/// * `env` - The execution environment.
+/// * `address` - The address of the strategy contract.
     pub fn new(env: &'a Env, address: Address) -> Self {
         Self { env, address }
     }
 
-    /// Deposit function.
+    /// Deposits the specified `amount` into the strategy.
+///
+/// # Arguments
+/// * `amount` - The positive integer amount to deposit.
     pub fn deposit(&self, amount: i128) {
         self.env.invoke_contract::<()>(
             &self.address,
@@ -123,7 +135,10 @@ impl<'a> StrategyClient<'a> {
         );
     }
 
-    /// Withdraw function.
+    /// Withdraws the specified `amount` from the strategy.
+///
+/// # Arguments
+/// * `amount` - The positive integer amount to withdraw.
     pub fn withdraw(&self, amount: i128) {
         self.env.invoke_contract::<()>(
             &self.address,
@@ -132,7 +147,10 @@ impl<'a> StrategyClient<'a> {
         );
     }
 
-    /// Balance function.
+    /// Queries the current balance of the strategy.
+///
+/// # Returns
+/// The current balance as an `i128`.
     pub fn balance(&self) -> i128 {
         self.env.invoke_contract::<i128>(
             &self.address,
@@ -146,7 +164,8 @@ impl<'a> StrategyClient<'a> {
 // Contract
 // ─────────────────────────────────────────────
 #[contract]
-/// VolatilityShield structure.
+/// The main contract struct for the Volatility Shield.
+/// Orchestrates user deposits, withdrawals, and oracle-driven rebalancing.
 pub struct VolatilityShield;
 
 #[contractimpl]
@@ -178,7 +197,16 @@ impl VolatilityShield {
     }
 
     // ── Deposit ───────────────────────────────
-    /// Deposit function.
+    /// Deposits assets into the vault, minting shares for the depositor.
+///
+/// # Arguments
+/// * `env` - The execution environment.
+/// * `from` - The address making the deposit.
+/// * `amount` - The quantity of the underlying asset to deposit.
+///
+/// # Panics
+/// * If `amount` is <= 0.
+/// * If `from` does not authorize the invocation.
     pub fn deposit(env: Env, from: Address, amount: i128) {
         if amount <= 0 {
             panic!("deposit amount must be positive");
@@ -214,7 +242,17 @@ impl VolatilityShield {
     }
 
     // ── Withdraw ──────────────────────────────
-    /// Withdraw function.
+    /// Withdraws assets from the vault by burning the specified `shares`.
+///
+/// # Arguments
+/// * `env` - The execution environment.
+/// * `from` - The address initiating the withdrawal.
+/// * `shares` - The amount of shares to burn.
+///
+/// # Panics
+/// * If `shares` is <= 0.
+/// * If `from` does not authorize the invocation.
+/// * If `from` lacks sufficient shares.
     pub fn withdraw(env: Env, from: Address, shares: i128) {
         if shares <= 0 {
             panic!("shares to withdraw must be positive");
@@ -348,7 +386,16 @@ impl VolatilityShield {
     }
 
     // ── Oracle Data ──────────────────────────────
-    /// Set max staleness function.
+    /// Configures the maximum allowed staleness for oracle data.
+///
+/// # Arguments
+/// * `env` - The execution environment.
+/// * `caller` - The admin address making the change.
+/// * `max_staleness` - The staleness threshold in seconds.
+///
+/// # Panics
+/// * If `caller` does not authorize the invocation.
+/// * If `caller` is not the admin.
     pub fn set_max_staleness(env: Env, caller: Address, max_staleness: u64) {
         caller.require_auth();
         let admin = Self::get_admin(&env);
@@ -360,7 +407,18 @@ impl VolatilityShield {
             .set(&DataKey::MaxStaleness, &max_staleness);
     }
 
-    /// Set oracle data function.
+    /// Pushes new strategy allocation weights from the oracle.
+///
+/// # Arguments
+/// * `env` - The execution environment.
+/// * `caller` - The oracle address making the update.
+/// * `allocations` - A map of strategy addresses to their target allocation in basis points.
+/// * `timestamp` - The timestamp of the oracle data.
+///
+/// # Panics
+/// * If `caller` does not authorize the invocation.
+/// * If `caller` is not the authorized oracle.
+/// * If the data is stale beyond `max_staleness`.
     pub fn set_oracle_data(
         env: Env,
         caller: Address,
@@ -475,7 +533,15 @@ impl VolatilityShield {
     }
 
     // ── Strategy Management ───────────────────
-    /// Add strategy function.
+    /// Registers a new strategy with the vault.
+///
+/// # Arguments
+/// * `env` - The execution environment.
+/// * `strategy` - The address of the strategy to add.
+///
+/// # Returns
+/// * `Ok(())` on success.
+/// * `Err(Error::AlreadyInitialized)` if the strategy is already registered.
     pub fn add_strategy(env: Env, strategy: Address) -> Result<(), Error> {
         let admin = Self::get_admin(&env);
         admin.require_auth();
@@ -637,7 +703,14 @@ impl VolatilityShield {
             .unwrap_or(0)
     }
 
-    /// Harvest function.
+    /// Harvests accumulated yield across all registered strategies.
+///
+/// # Arguments
+/// * `env` - The execution environment.
+///
+/// # Returns
+/// * `Ok(total_yield)` containing the total harvested amount.
+/// * `Err(Error::NoStrategies)` if no strategies are registered.
     pub fn harvest(env: Env) -> Result<i128, Error> {
         let admin = Self::get_admin(&env);
         admin.require_auth();
@@ -898,7 +971,10 @@ impl VolatilityShield {
             .unwrap_or(0)
     }
 
-    /// Balance function.
+    /// Queries the current balance of the strategy.
+///
+/// # Returns
+/// The current balance as an `i128`.
     pub fn balance(env: Env, user: Address) -> i128 {
         env.storage()
             .persistent()
