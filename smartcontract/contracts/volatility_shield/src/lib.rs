@@ -44,6 +44,7 @@ pub enum Error {
     BelowThreshold = 12,
     WithdrawalNotFound = 13,
     WithdrawalAlreadyProcessed = 14,
+    NotImplemented = 15,
 }
 
 // ─────────────────────────────────────────────
@@ -89,6 +90,8 @@ pub enum DataKey {
     CrossChainEndpointCounter,
     /// Monotonically incrementing nonce for CrossChainRebalance payloads.
     CrossChainRebalanceNonce,
+    /// Governance token address for future governance integration.
+    GovernanceToken,
 }
 
 // ─────────────────────────────────────────────
@@ -231,14 +234,16 @@ impl VolatilityShield {
 
         let total_shares = Self::total_shares(&env);
         let total_assets = Self::total_assets(&env);
-        Self::set_total_shares(
-            env.clone(),
-            total_shares.checked_add(shares_to_mint).unwrap(),
-        );
-        Self::set_total_assets(env.clone(), total_assets.checked_add(amount).unwrap());
+        let new_total_shares = total_shares.checked_add(shares_to_mint).unwrap();
+        let new_total_assets = total_assets.checked_add(amount).unwrap();
+        Self::set_total_shares(env.clone(), new_total_shares);
+        Self::set_total_assets(env.clone(), new_total_assets);
 
-        env.events()
-            .publish((symbol_short!("Deposit"), from.clone()), amount);
+        let share_price_at_time = if total_shares == 0 { 10_000_000 } else { total_assets * 10_000_000 / total_shares };
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Deposit"), from.clone()),
+            (amount, shares_to_mint, new_total_assets, new_total_shares, share_price_at_time)
+        );
     }
 
     // ── Withdraw ──────────────────────────────
@@ -272,11 +277,11 @@ impl VolatilityShield {
         let total_shares = Self::total_shares(&env);
         let total_assets = Self::total_assets(&env);
 
-        Self::set_total_shares(env.clone(), total_shares.checked_sub(shares).unwrap());
-        Self::set_total_assets(
-            env.clone(),
-            total_assets.checked_sub(assets_to_withdraw).unwrap(),
-        );
+        let new_total_shares = total_shares.checked_sub(shares).unwrap();
+        let new_total_assets = total_assets.checked_sub(assets_to_withdraw).unwrap();
+
+        Self::set_total_shares(env.clone(), new_total_shares);
+        Self::set_total_assets(env.clone(), new_total_assets);
         env.storage().persistent().set(
             &balance_key,
             &(current_balance.checked_sub(shares).unwrap()),
@@ -297,12 +302,14 @@ impl VolatilityShield {
         if fee > 0 {
             let treasury_addr = Self::treasury(&env);
             token_client.transfer(&contract_addr, &treasury_addr, &fee);
-            env.events()
-                .publish((symbol_short!("Fee"), symbol_short!("collect")), fee);
+            env.events().publish((soroban_sdk::Symbol::new(&env, "Fee"), soroban_sdk::Symbol::new(&env, "Collect")), fee);
         }
 
-        env.events()
-            .publish((symbol_short!("Withdraw"), from.clone()), shares);
+        let share_price_at_time = if total_shares == 0 { 10_000_000 } else { total_assets * 10_000_000 / total_shares };
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Withdraw"), from.clone()),
+            (shares, net_assets, fee, new_total_assets, new_total_shares, share_price_at_time)
+        );
     }
 
     // ── Withdrawal Queue ───────────────────────
@@ -530,6 +537,11 @@ impl VolatilityShield {
                 token_client.transfer(&strategy_addr, &vault, &diff);
             }
         }
+        
+        let final_assets = Self::total_assets(&env);
+        let final_shares = Self::total_shares(&env);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "Rebalance"),), allocations);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "VaultSnapshot"),), (final_assets, final_shares));
     }
 
     // ── Strategy Management ───────────────────
@@ -735,8 +747,10 @@ impl VolatilityShield {
             );
         }
 
-        env.events()
-            .publish((symbol_short!("harvest"),), total_yield);
+        let final_assets = Self::total_assets(&env);
+        let final_shares = Self::total_shares(&env);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "Harvest"),), (total_yield, final_assets));
+        env.events().publish((soroban_sdk::Symbol::new(&env, "VaultSnapshot"),), (final_assets, final_shares));
         Ok(total_yield)
     }
 
@@ -1322,6 +1336,46 @@ impl VolatilityShield {
         );
 
         Ok(next_nonce)
+    }
+
+    // ── Governance Token (SC-29) ──────────────
+
+    /// Set the governance token address. Admin-only.
+    pub fn set_governance_token(env: Env, caller: Address, token: Address) {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            panic!("Unauthorized");
+        }
+        env.storage().instance().set(&DataKey::GovernanceToken, &token);
+        env.events().publish((symbol_short!("GovToken"), symbol_short!("set")), token);
+    }
+
+    /// Read the governance token address if set.
+    pub fn get_governance_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::GovernanceToken)
+    }
+
+    /// Calculate the voting power of a user based on their proportional asset backing.
+    pub fn get_voting_power(env: Env, user: Address) -> i128 {
+        let user_shares = Self::balance(env.clone(), user);
+        if user_shares == 0 {
+            return 0;
+        }
+
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+
+        if total_shares == 0 {
+            return 0;
+        }
+
+        (user_shares * total_assets) / total_shares
+    }
+
+    /// Cast a vote. Currently unimplemented.
+    pub fn cast_vote(env: Env, voter: Address, _proposal_id: u32, _support: bool) {
+        voter.require_auth();
+        panic_with_error!(&env, Error::NotImplemented);
     }
 
     // ── Contract Upgrade ──────────────────────
