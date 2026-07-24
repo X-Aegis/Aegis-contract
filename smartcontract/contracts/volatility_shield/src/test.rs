@@ -1,12 +1,18 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, Map};
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient;
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env, Map,
+};
 
 extern crate mock_strategy;
 
-fn create_token_contract<'a>(env: &Env, admin: &Address) -> (Address, StellarAssetClient<'a>, TokenClient<'a>) {
+fn create_token_contract<'a>(
+    env: &Env,
+    admin: &Address,
+) -> (Address, StellarAssetClient<'a>, TokenClient<'a>) {
     let contract_id = env.register_stellar_asset_contract_v2(admin.clone());
     let stellar_asset_client = StellarAssetClient::new(env, &contract_id.address());
     let token_client = TokenClient::new(env, &contract_id.address());
@@ -15,20 +21,20 @@ fn create_token_contract<'a>(env: &Env, admin: &Address) -> (Address, StellarAss
 
 #[test]
 fn test_init_stores_roles() {
-    let env         = Env::default();
+    let env = Env::default();
     let contract_id = env.register(VolatilityShield, ());
-    let client      = VolatilityShieldClient::new(&env, &contract_id);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
 
-    let admin  = Address::generate(&env);
-    let asset  = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
 
     client.init(&admin, &asset, &oracle, &treasury, &500u32);
 
-    assert_eq!(client.get_admin(),  admin);
+    assert_eq!(client.get_admin(), admin);
     assert_eq!(client.get_oracle(), oracle);
-    assert_eq!(client.get_asset(),  asset);
+    assert_eq!(client.get_asset(), asset);
     assert_eq!(client.treasury(), treasury);
     assert_eq!(client.fee_percentage(), 500u32);
 }
@@ -149,7 +155,7 @@ fn test_take_fees() {
     let asset = Address::generate(&env);
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
-    
+
     client.init(&admin, &asset, &oracle, &treasury, &500u32);
 
     let deposit_amount = 1000;
@@ -321,28 +327,28 @@ fn test_take_fees_zero_fee_always_zero() {
 fn test_withdraw_success() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
-    
+
     let token_admin = Address::generate(&env);
     let (token_id, stellar_asset_client, token_client) = create_token_contract(&env, &token_admin);
-    
+
     let contract_id = env.register(VolatilityShield, ());
     let client = VolatilityShieldClient::new(&env, &contract_id);
-    
+
     let admin = Address::generate(&env);
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
-    
+
     client.init(&admin, &token_id, &oracle, &treasury, &0u32);
     client.set_total_shares(&1000);
     client.set_total_assets(&5000);
-    
+
     let user = Address::generate(&env);
     client.set_balance(&user, &100);
-    
+
     stellar_asset_client.mint(&contract_id, &5000);
-    
+
     client.withdraw(&user, &50);
-    
+
     assert_eq!(client.balance(&user), 50);
     assert_eq!(client.total_shares(), 950);
     assert_eq!(client.total_assets(), 4750);
@@ -352,14 +358,14 @@ fn test_withdraw_success() {
 #[test]
 #[should_panic(expected = "allocation percentages must sum to 10000 BPS")]
 fn test_rebalance_admin_auth_accepted() {
-    let env         = Env::default();
+    let env = Env::default();
     env.mock_all_auths();
 
     let contract_id = env.register(VolatilityShield, ());
-    let client      = VolatilityShieldClient::new(&env, &contract_id);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
 
-    let admin  = Address::generate(&env);
-    let asset  = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
 
@@ -376,23 +382,23 @@ fn test_rebalance_admin_auth_accepted() {
 #[test]
 #[should_panic(expected = "Stale oracle data")]
 fn test_oracle_staleness_rejected() {
-    let env         = Env::default();
+    let env = Env::default();
     env.mock_all_auths();
 
     let contract_id = env.register(VolatilityShield, ());
-    let client      = VolatilityShieldClient::new(&env, &contract_id);
+    let client = VolatilityShieldClient::new(&env, &contract_id);
 
-    let admin  = Address::generate(&env);
-    let asset  = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
     let oracle = Address::generate(&env);
     let treasury = Address::generate(&env);
 
     client.init(&admin, &asset, &oracle, &treasury, &0u32);
 
     let allocations: Map<Address, i128> = Map::new(&env);
-    
+
     client.set_oracle_data(&oracle, &allocations, &1000);
-    
+
     env.ledger().with_mut(|li| {
         li.timestamp = 5000;
     });
@@ -419,7 +425,9 @@ fn test_rebalance_invalid_sum() {
     let mut allocations: Map<Address, i128> = Map::new(&env);
     allocations.set(mock_strategy_id, 9999);
     client.set_oracle_data(&oracle, &allocations, &1000);
-    env.ledger().with_mut(|li| { li.timestamp = 2000; });
+    env.ledger().with_mut(|li| {
+        li.timestamp = 2000;
+    });
     client.rebalance(&admin);
 }
 
@@ -442,7 +450,9 @@ fn test_rebalance_negative_allocation() {
     let mut allocations: Map<Address, i128> = Map::new(&env);
     allocations.set(mock_strategy_id, -100);
     client.set_oracle_data(&oracle, &allocations, &1000);
-    env.ledger().with_mut(|li| { li.timestamp = 2000; });
+    env.ledger().with_mut(|li| {
+        li.timestamp = 2000;
+    });
     client.rebalance(&admin);
 }
 
@@ -464,7 +474,9 @@ fn test_rebalance_unlisted_strategy() {
     let mut allocations: Map<Address, i128> = Map::new(&env);
     allocations.set(unlisted_strategy_id, 10000);
     client.set_oracle_data(&oracle, &allocations, &1000);
-    env.ledger().with_mut(|li| { li.timestamp = 2000; });
+    env.ledger().with_mut(|li| {
+        li.timestamp = 2000;
+    });
     client.rebalance(&admin);
 }
 
@@ -760,8 +772,8 @@ fn test_get_strategy_health_default_zero() {
 // Flash Loan Support (SC-32)
 // ─────────────────────────────────────────────
 
-use soroban_sdk::{contract, contractimpl, symbol_short};
 use crate::flash_loan::FlashLoanReceiverClient;
+use soroban_sdk::{contract, contractimpl, symbol_short};
 
 /// Minimal flash-loan provider used to drive the vault's flash-loan flow in
 /// tests. It lends `amount`, calls the vault's `flash_loan_callback`, and then
@@ -773,11 +785,17 @@ pub struct MockFlashLoanProvider;
 #[contractimpl]
 impl MockFlashLoanProvider {
     pub fn init(env: Env, fee_bps: u32) {
-        env.storage().instance().set(&symbol_short!("fee_bps"), &fee_bps);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("fee_bps"), &fee_bps);
     }
 
     pub fn flash_loan(env: Env, receiver: Address, token: Address, amount: i128) {
-        let fee_bps: u32 = env.storage().instance().get(&symbol_short!("fee_bps")).unwrap_or(0);
+        let fee_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("fee_bps"))
+            .unwrap_or(0);
         let fee = amount * fee_bps as i128 / 10000;
 
         let tc = TokenClient::new(&env, &token);
@@ -786,7 +804,8 @@ impl MockFlashLoanProvider {
 
         // Lend the principal, then hand control to the vault's callback.
         tc.transfer(&me, &receiver, &amount);
-        FlashLoanReceiverClient::new(&env, &receiver).flash_loan_callback(&token, &amount, &fee, &me);
+        FlashLoanReceiverClient::new(&env, &receiver)
+            .flash_loan_callback(&token, &amount, &fee, &me);
 
         // Atomicity: must have been repaid principal + fee, else revert all.
         let after = tc.balance(&me);
@@ -822,12 +841,7 @@ fn setup_vault<'a>(
 
 /// Register + initialize a mock provider charging `fee_bps`, funded with
 /// `funding` of the token so it can lend.
-fn setup_provider(
-    env: &Env,
-    sac: &StellarAssetClient,
-    fee_bps: u32,
-    funding: i128,
-) -> Address {
+fn setup_provider(env: &Env, sac: &StellarAssetClient, fee_bps: u32, funding: i128) -> Address {
     let provider_id = env.register(MockFlashLoanProvider, ());
     MockFlashLoanProviderClient::new(env, &provider_id).init(&fee_bps);
     sac.mint(&provider_id, &funding);
@@ -1166,7 +1180,7 @@ fn test_upgrade() {
     // Provide a valid WASM module to satisfy Soroban validation
     let wasm = soroban_sdk::Bytes::from_slice(&env, include_bytes!("../test_snapshots/dummy.wasm"));
     let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
-    
+
     client.upgrade(&admin, &new_wasm_hash);
 
     // Assert that state persists
