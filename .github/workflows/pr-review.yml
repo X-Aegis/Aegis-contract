@@ -5,6 +5,10 @@ on:
     types: [opened, synchronize, reopened, edited]
   issue_comment:
     types: [created]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
     paths-ignore:
       - '.github/workflows/**'
 
