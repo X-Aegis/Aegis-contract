@@ -176,10 +176,16 @@ impl VolatilityShield {
 
         let total_shares = Self::total_shares(&env);
         let total_assets = Self::total_assets(&env);
-        Self::set_total_shares(env.clone(), total_shares.checked_add(shares_to_mint).unwrap());
-        Self::set_total_assets(env.clone(), total_assets.checked_add(amount).unwrap());
+        let new_total_shares = total_shares.checked_add(shares_to_mint).unwrap();
+        let new_total_assets = total_assets.checked_add(amount).unwrap();
+        Self::set_total_shares(env.clone(), new_total_shares);
+        Self::set_total_assets(env.clone(), new_total_assets);
 
-        env.events().publish((symbol_short!("Deposit"), from.clone()), amount);
+        let share_price_at_time = if total_shares == 0 { 10_000_000 } else { total_assets * 10_000_000 / total_shares };
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Deposit"), from.clone()),
+            (amount, shares_to_mint, new_total_assets, new_total_shares, share_price_at_time)
+        );
     }
 
     // ── Withdraw ──────────────────────────────
@@ -202,8 +208,11 @@ impl VolatilityShield {
         let total_shares = Self::total_shares(&env);
         let total_assets = Self::total_assets(&env);
 
-        Self::set_total_shares(env.clone(), total_shares.checked_sub(shares).unwrap());
-        Self::set_total_assets(env.clone(), total_assets.checked_sub(assets_to_withdraw).unwrap());
+        let new_total_shares = total_shares.checked_sub(shares).unwrap();
+        let new_total_assets = total_assets.checked_sub(assets_to_withdraw).unwrap();
+
+        Self::set_total_shares(env.clone(), new_total_shares);
+        Self::set_total_assets(env.clone(), new_total_assets);
         env.storage().persistent().set(&balance_key, &(current_balance.checked_sub(shares).unwrap()));
 
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).expect("Token not initialized");
@@ -217,10 +226,14 @@ impl VolatilityShield {
         if fee > 0 {
             let treasury_addr = Self::treasury(&env);
             token_client.transfer(&contract_addr, &treasury_addr, &fee);
-            env.events().publish((symbol_short!("Fee"), symbol_short!("collect")), fee);
+            env.events().publish((soroban_sdk::Symbol::new(&env, "Fee"), soroban_sdk::Symbol::new(&env, "Collect")), fee);
         }
 
-    env.events().publish((symbol_short!("Withdraw"), from.clone()), shares);
+        let share_price_at_time = if total_shares == 0 { 10_000_000 } else { total_assets * 10_000_000 / total_shares };
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Withdraw"), from.clone()),
+            (shares, net_assets, fee, new_total_assets, new_total_shares, share_price_at_time)
+        );
   }
 
   // ── Withdrawal Queue ───────────────────────
@@ -404,6 +417,11 @@ impl VolatilityShield {
                 token_client.transfer(&strategy_addr, &vault, &diff);
             }
         }
+        
+        let final_assets = Self::total_assets(&env);
+        let final_shares = Self::total_shares(&env);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "Rebalance"),), allocations);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "VaultSnapshot"),), (final_assets, final_shares));
     }
 
     // ── Strategy Management ───────────────────
@@ -577,7 +595,10 @@ impl VolatilityShield {
             Self::set_total_assets(env.clone(), current_assets.checked_add(total_yield).unwrap());
         }
 
-        env.events().publish((symbol_short!("harvest"),), total_yield);
+        let final_assets = Self::total_assets(&env);
+        let final_shares = Self::total_shares(&env);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "Harvest"),), (total_yield, final_assets));
+        env.events().publish((soroban_sdk::Symbol::new(&env, "VaultSnapshot"),), (final_assets, final_shares));
         Ok(total_yield)
     }
 
