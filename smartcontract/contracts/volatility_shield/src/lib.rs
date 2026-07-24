@@ -115,18 +115,18 @@ pub struct PendingWithdrawal {
 
 impl<'a> StrategyClient<'a> {
     /// Creates a new `StrategyClient` instance for the given address.
-///
-/// # Arguments
-/// * `env` - The execution environment.
-/// * `address` - The address of the strategy contract.
+    ///
+    /// # Arguments
+    /// * `env` - The execution environment.
+    /// * `address` - The address of the strategy contract.
     pub fn new(env: &'a Env, address: Address) -> Self {
         Self { env, address }
     }
 
     /// Deposits the specified `amount` into the strategy.
-///
-/// # Arguments
-/// * `amount` - The positive integer amount to deposit.
+    ///
+    /// # Arguments
+    /// * `amount` - The positive integer amount to deposit.
     pub fn deposit(&self, amount: i128) {
         self.env.invoke_contract::<()>(
             &self.address,
@@ -136,9 +136,9 @@ impl<'a> StrategyClient<'a> {
     }
 
     /// Withdraws the specified `amount` from the strategy.
-///
-/// # Arguments
-/// * `amount` - The positive integer amount to withdraw.
+    ///
+    /// # Arguments
+    /// * `amount` - The positive integer amount to withdraw.
     pub fn withdraw(&self, amount: i128) {
         self.env.invoke_contract::<()>(
             &self.address,
@@ -148,9 +148,9 @@ impl<'a> StrategyClient<'a> {
     }
 
     /// Queries the current balance of the strategy.
-///
-/// # Returns
-/// The current balance as an `i128`.
+    ///
+    /// # Returns
+    /// The current balance as an `i128`.
     pub fn balance(&self) -> i128 {
         self.env.invoke_contract::<i128>(
             &self.address,
@@ -198,15 +198,15 @@ impl VolatilityShield {
 
     // ── Deposit ───────────────────────────────
     /// Deposits assets into the vault, minting shares for the depositor.
-///
-/// # Arguments
-/// * `env` - The execution environment.
-/// * `from` - The address making the deposit.
-/// * `amount` - The quantity of the underlying asset to deposit.
-///
-/// # Panics
-/// * If `amount` is <= 0.
-/// * If `from` does not authorize the invocation.
+    ///
+    /// # Arguments
+    /// * `env` - The execution environment.
+    /// * `from` - The address making the deposit.
+    /// * `amount` - The quantity of the underlying asset to deposit.
+    ///
+    /// # Panics
+    /// * If `amount` is <= 0.
+    /// * If `from` does not authorize the invocation.
     pub fn deposit(env: Env, from: Address, amount: i128) {
         if amount <= 0 {
             panic!("deposit amount must be positive");
@@ -243,16 +243,16 @@ impl VolatilityShield {
 
     // ── Withdraw ──────────────────────────────
     /// Withdraws assets from the vault by burning the specified `shares`.
-///
-/// # Arguments
-/// * `env` - The execution environment.
-/// * `from` - The address initiating the withdrawal.
-/// * `shares` - The amount of shares to burn.
-///
-/// # Panics
-/// * If `shares` is <= 0.
-/// * If `from` does not authorize the invocation.
-/// * If `from` lacks sufficient shares.
+    ///
+    /// # Arguments
+    /// * `env` - The execution environment.
+    /// * `from` - The address initiating the withdrawal.
+    /// * `shares` - The amount of shares to burn.
+    ///
+    /// # Panics
+    /// * If `shares` is <= 0.
+    /// * If `from` does not authorize the invocation.
+    /// * If `from` lacks sufficient shares.
     pub fn withdraw(env: Env, from: Address, shares: i128) {
         if shares <= 0 {
             panic!("shares to withdraw must be positive");
@@ -387,15 +387,15 @@ impl VolatilityShield {
 
     // ── Oracle Data ──────────────────────────────
     /// Configures the maximum allowed staleness for oracle data.
-///
-/// # Arguments
-/// * `env` - The execution environment.
-/// * `caller` - The admin address making the change.
-/// * `max_staleness` - The staleness threshold in seconds.
-///
-/// # Panics
-/// * If `caller` does not authorize the invocation.
-/// * If `caller` is not the admin.
+    ///
+    /// # Arguments
+    /// * `env` - The execution environment.
+    /// * `caller` - The admin address making the change.
+    /// * `max_staleness` - The staleness threshold in seconds.
+    ///
+    /// # Panics
+    /// * If `caller` does not authorize the invocation.
+    /// * If `caller` is not the admin.
     pub fn set_max_staleness(env: Env, caller: Address, max_staleness: u64) {
         caller.require_auth();
         let admin = Self::get_admin(&env);
@@ -408,17 +408,17 @@ impl VolatilityShield {
     }
 
     /// Pushes new strategy allocation weights from the oracle.
-///
-/// # Arguments
-/// * `env` - The execution environment.
-/// * `caller` - The oracle address making the update.
-/// * `allocations` - A map of strategy addresses to their target allocation in basis points.
-/// * `timestamp` - The timestamp of the oracle data.
-///
-/// # Panics
-/// * If `caller` does not authorize the invocation.
-/// * If `caller` is not the authorized oracle.
-/// * If the data is stale beyond `max_staleness`.
+    ///
+    /// # Arguments
+    /// * `env` - The execution environment.
+    /// * `caller` - The oracle address making the update.
+    /// * `allocations` - A map of strategy addresses to their target allocation in basis points.
+    /// * `timestamp` - The timestamp of the oracle data.
+    ///
+    /// # Panics
+    /// * If `caller` does not authorize the invocation.
+    /// * If `caller` is not the authorized oracle.
+    /// * If the data is stale beyond `max_staleness`.
     pub fn set_oracle_data(
         env: Env,
         caller: Address,
@@ -534,14 +534,14 @@ impl VolatilityShield {
 
     // ── Strategy Management ───────────────────
     /// Registers a new strategy with the vault.
-///
-/// # Arguments
-/// * `env` - The execution environment.
-/// * `strategy` - The address of the strategy to add.
-///
-/// # Returns
-/// * `Ok(())` on success.
-/// * `Err(Error::AlreadyInitialized)` if the strategy is already registered.
+    ///
+    /// # Arguments
+    /// * `env` - The execution environment.
+    /// * `strategy` - The address of the strategy to add.
+    ///
+    /// # Returns
+    /// * `Ok(())` on success.
+    /// * `Err(Error::AlreadyInitialized)` if the strategy is already registered.
     pub fn add_strategy(env: Env, strategy: Address) -> Result<(), Error> {
         let admin = Self::get_admin(&env);
         admin.require_auth();
@@ -704,13 +704,13 @@ impl VolatilityShield {
     }
 
     /// Harvests accumulated yield across all registered strategies.
-///
-/// # Arguments
-/// * `env` - The execution environment.
-///
-/// # Returns
-/// * `Ok(total_yield)` containing the total harvested amount.
-/// * `Err(Error::NoStrategies)` if no strategies are registered.
+    ///
+    /// # Arguments
+    /// * `env` - The execution environment.
+    ///
+    /// # Returns
+    /// * `Ok(total_yield)` containing the total harvested amount.
+    /// * `Err(Error::NoStrategies)` if no strategies are registered.
     pub fn harvest(env: Env) -> Result<i128, Error> {
         let admin = Self::get_admin(&env);
         admin.require_auth();
@@ -907,7 +907,7 @@ impl VolatilityShield {
     }
 
     // ── View helpers ──────────────────────────
-    /// Total assets function.
+    /// Returns the total amount of underlying assets managed by the vault.
     pub fn total_assets(env: &Env) -> i128 {
         env.storage()
             .instance()
@@ -915,7 +915,7 @@ impl VolatilityShield {
             .unwrap_or(0)
     }
 
-    /// Total shares function.
+    /// Returns the total amount of shares currently minted by the vault.
     pub fn total_shares(env: &Env) -> i128 {
         env.storage()
             .instance()
@@ -923,7 +923,7 @@ impl VolatilityShield {
             .unwrap_or(0)
     }
 
-    /// Get admin function.
+    /// Returns the address of the current admin.
     pub fn get_admin(env: &Env) -> Address {
         env.storage()
             .instance()
@@ -931,7 +931,7 @@ impl VolatilityShield {
             .expect("Not initialized")
     }
 
-    /// Get oracle function.
+    /// Returns the address of the current oracle.
     pub fn get_oracle(env: &Env) -> Address {
         env.storage()
             .instance()
@@ -939,7 +939,7 @@ impl VolatilityShield {
             .expect("Not initialized")
     }
 
-    /// Get asset function.
+    /// Returns the address of the primary underlying asset.
     pub fn get_asset(env: &Env) -> Address {
         env.storage()
             .instance()
@@ -947,7 +947,7 @@ impl VolatilityShield {
             .expect("Not initialized")
     }
 
-    /// Get strategies function.
+    /// Returns a list of all registered strategy addresses.
     pub fn get_strategies(env: &Env) -> Vec<Address> {
         env.storage()
             .instance()
@@ -955,7 +955,7 @@ impl VolatilityShield {
             .unwrap_or(Vec::new(env))
     }
 
-    /// Treasury function.
+    /// Returns the address of the treasury fee recipient.
     pub fn treasury(env: &Env) -> Address {
         env.storage()
             .instance()
@@ -963,7 +963,7 @@ impl VolatilityShield {
             .expect("Not initialized")
     }
 
-    /// Fee percentage function.
+    /// Returns the current withdrawal fee percentage in basis points.
     pub fn fee_percentage(env: &Env) -> u32 {
         env.storage()
             .instance()
@@ -972,9 +972,9 @@ impl VolatilityShield {
     }
 
     /// Queries the current balance of the strategy.
-///
-/// # Returns
-/// The current balance as an `i128`.
+    ///
+    /// # Returns
+    /// The current balance as an `i128`.
     pub fn balance(env: Env, user: Address) -> i128 {
         env.storage()
             .persistent()
@@ -1025,7 +1025,7 @@ impl VolatilityShield {
     }
 
     // ── Internal Helpers ──────────────────────
-    /// Take fees function.
+    /// Calculates and deducts the withdrawal fee from the provided asset amount, returning the net assets and fee taken.
     pub fn take_fees(env: &Env, amount: i128) -> (i128, i128) {
         let fee_pct = Self::effective_fee_pct(env);
         if fee_pct == 0 {
@@ -1095,7 +1095,7 @@ impl VolatilityShield {
         effective as u32
     }
 
-    /// Convert to shares function.
+    /// Converts an amount of underlying assets to the equivalent number of shares, rounding down.
     pub fn convert_to_shares(env: Env, amount: i128) -> i128 {
         if amount < 0 {
             panic!("negative amount");
@@ -1112,7 +1112,7 @@ impl VolatilityShield {
             .unwrap()
     }
 
-    /// Convert to assets function.
+    /// Converts an amount of shares to the equivalent amount of underlying assets, rounding down.
     pub fn convert_to_assets(env: Env, shares: i128) -> i128 {
         if shares < 0 {
             panic!("negative amount");
@@ -1129,24 +1129,24 @@ impl VolatilityShield {
             .unwrap()
     }
 
-    /// Set total assets function.
+    /// Internally updates the total assets storage.
     pub fn set_total_assets(env: Env, amount: i128) {
         env.storage().instance().set(&DataKey::TotalAssets, &amount);
     }
 
-    /// Set total shares function.
+    /// Internally updates the total shares storage.
     pub fn set_total_shares(env: Env, amount: i128) {
         env.storage().instance().set(&DataKey::TotalShares, &amount);
     }
 
-    /// Set balance function.
+    /// Internally sets the share balance of a specific user.
     pub fn set_balance(env: Env, user: Address, amount: i128) {
         env.storage()
             .persistent()
             .set(&DataKey::Balance(user), &amount);
     }
 
-    /// Set token function.
+    /// Internally updates the token address storage.
     pub fn set_token(env: Env, token: Address) {
         env.storage().instance().set(&DataKey::Token, &token);
     }
@@ -1325,7 +1325,7 @@ impl VolatilityShield {
     }
 
     // ── Contract Upgrade ──────────────────────
-    /// Upgrade function.
+    /// Upgrades the contract's WebAssembly code to a new version. Admin-only.
     pub fn upgrade(env: Env, caller: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         caller.require_auth();
         let admin = Self::get_admin(&env);
