@@ -181,9 +181,10 @@ impl VolatilityShield {
         Self::set_total_shares(env.clone(), new_total_shares);
         Self::set_total_assets(env.clone(), new_total_assets);
 
+        let share_price_at_time = if total_shares == 0 { 10_000_000 } else { total_assets * 10_000_000 / total_shares };
         env.events().publish(
-            (symbol_short!("Deposit"), from.clone()),
-            (amount, shares_to_mint, new_total_assets, new_total_shares)
+            (soroban_sdk::Symbol::new(&env, "Deposit"), from.clone()),
+            (amount, shares_to_mint, new_total_assets, new_total_shares, share_price_at_time)
         );
     }
 
@@ -225,12 +226,13 @@ impl VolatilityShield {
         if fee > 0 {
             let treasury_addr = Self::treasury(&env);
             token_client.transfer(&contract_addr, &treasury_addr, &fee);
-            env.events().publish((symbol_short!("Fee"), symbol_short!("collect")), fee);
+            env.events().publish((soroban_sdk::Symbol::new(&env, "Fee"), soroban_sdk::Symbol::new(&env, "Collect")), fee);
         }
 
+        let share_price_at_time = if total_shares == 0 { 10_000_000 } else { total_assets * 10_000_000 / total_shares };
         env.events().publish(
-            (symbol_short!("Withdraw"), from.clone()),
-            (shares, net_assets, fee, new_total_assets, new_total_shares)
+            (soroban_sdk::Symbol::new(&env, "Withdraw"), from.clone()),
+            (shares, net_assets, fee, new_total_assets, new_total_shares, share_price_at_time)
         );
   }
 
@@ -416,7 +418,10 @@ impl VolatilityShield {
             }
         }
         
-        env.events().publish((symbol_short!("Rebalance"),), allocations);
+        let final_assets = Self::total_assets(&env);
+        let final_shares = Self::total_shares(&env);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "Rebalance"),), allocations);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "VaultSnapshot"),), (final_assets, final_shares));
     }
 
     // ── Strategy Management ───────────────────
@@ -591,7 +596,9 @@ impl VolatilityShield {
         }
 
         let final_assets = Self::total_assets(&env);
-        env.events().publish((symbol_short!("harvest"),), (total_yield, final_assets));
+        let final_shares = Self::total_shares(&env);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "Harvest"),), (total_yield, final_assets));
+        env.events().publish((soroban_sdk::Symbol::new(&env, "VaultSnapshot"),), (final_assets, final_shares));
         Ok(total_yield)
     }
 
