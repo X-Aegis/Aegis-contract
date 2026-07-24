@@ -9,8 +9,7 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
-    paths-ignore:
-      - '.github/workflows/**'
+
 
 permissions:
   contents: write
@@ -19,7 +18,7 @@ permissions:
 jobs:
   audit:
     name: Institutional PR Audit
-    if: (github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request)) && github.actor != 'bbkenny' && !endsWith(github.actor, '[bot]')
+    if: (github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)) && github.actor != 'bbkenny' && !contains(github.actor, 'bot')
     runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.MAINTAINER_TOKEN != '' && secrets.MAINTAINER_TOKEN || secrets.GITHUB_TOKEN }}
