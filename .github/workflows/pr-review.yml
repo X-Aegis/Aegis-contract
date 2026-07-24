@@ -228,7 +228,7 @@ jobs:
                 console.log("🚫 AI Review Result: FAIL");
                 const feedback = responseText.replace(/^FAIL\s*/i, '').trim();
                 console.log(`   AI feedback: "${feedback.substring(0, 100)}..."`);
-                const comment = `**Review against issue body failed**\n\nHey @${author}, thanks for the PR! I just reviewed your code against the linked issue, and it looks like it needs some adjustments before we can merge it:\n\n> ${feedback.split('\n').join('\n> ')}`;
+                const comment = `**Review against issue body failed**\n\n${feedback}`;
 
                 fs.writeFileSync('feedback.txt', comment);
                 execSync(`gh pr comment ${prNumber} --body-file feedback.txt`);
