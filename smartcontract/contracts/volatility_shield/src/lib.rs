@@ -280,6 +280,7 @@ impl VolatilityShield {
         let new_total_shares = total_shares.checked_sub(shares).unwrap();
         let new_total_assets = total_assets.checked_sub(assets_to_withdraw).unwrap();
 
+
         Self::set_total_shares(env.clone(), new_total_shares);
         Self::set_total_assets(env.clone(), new_total_assets);
         env.storage().persistent().set(
@@ -310,6 +311,7 @@ impl VolatilityShield {
             (soroban_sdk::Symbol::new(&env, "Withdraw"), from.clone()),
             (shares, net_assets, fee, new_total_assets, new_total_shares, share_price_at_time)
         );
+
     }
 
     // ── Withdrawal Queue ───────────────────────
