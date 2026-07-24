@@ -30,6 +30,18 @@ jobs:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
           allow-unsafe-pr-checkout: true
 
+      - name: ❌ Check for Workflow Tampering
+        run: |
+          AUTHOR_ROLE=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER -q .author_association)
+          if [[ "$AUTHOR_ROLE" != "OWNER" && "$AUTHOR_ROLE" != "MEMBER" && "$AUTHOR_ROLE" != "COLLABORATOR" ]]; then
+            CHANGED_FILES=$(gh pr view $PR_NUMBER --json files -q '.files[].path')
+            if echo "$CHANGED_FILES" | grep -q "^.github/"; then
+              gh pr comment $PR_NUMBER --body "🚨 **SECURITY ALERT**: External contributors are not permitted to modify files in the \`.github/\` directory. Please revert these changes to proceed."
+              gh pr close $PR_NUMBER
+              exit 1
+            fi
+          fi
+
       - name: 🔍 Check for Issue Link
         run: |
           PR_BODY=$(gh pr view $PR_NUMBER --json body -q .body)
