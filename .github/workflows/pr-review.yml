@@ -8,7 +8,6 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
 
 
 permissions:
@@ -120,6 +119,21 @@ jobs:
           echo "═══════════════════════════════════════════"
           echo "🤖 AI REVIEW: Starting Claude Code Review"
           echo "═══════════════════════════════════════════"
+
+          echo "═══════════════════════════════════════════"
+          echo "🛑 DEBOUNCE CHECK: Preventing Double Spam"
+          echo "═══════════════════════════════════════════"
+          LAST_BOT_COMMENT_TIME=$(gh pr view $PR_NUMBER --json comments -q '.comments | map(select(.author.login == "bbkenny")) | last | .createdAt' 2>/dev/null || echo "")
+          if [ "$LAST_BOT_COMMENT_TIME" != "null" ] && [ -n "$LAST_BOT_COMMENT_TIME" ]; then
+            NOW=$(date +%s)
+            LAST_TIME=$(date -d "$LAST_BOT_COMMENT_TIME" +%s)
+            DIFF=$((NOW - LAST_TIME))
+            if [ "$DIFF" -lt 120 ]; then
+              echo "✅ Bot just commented $DIFF seconds ago. Skipping AI review and comment to keep checks green!"
+              echo "true" > skip_comment.txt
+              exit 0
+            fi
+          fi
 
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "⚠️ No ANTHROPIC_API_KEY found — skipping AI review."
