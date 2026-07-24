@@ -39,6 +39,7 @@ pub enum Error {
     BelowThreshold = 12,
     WithdrawalNotFound = 13,
     WithdrawalAlreadyProcessed = 14,
+    NotImplemented = 15,
 }
 
 // ─────────────────────────────────────────────
@@ -82,6 +83,8 @@ pub enum DataKey {
     CrossChainEndpointCounter,
     /// Monotonically incrementing nonce for CrossChainRebalance payloads.
     CrossChainRebalanceNonce,
+    /// Governance token address for future governance integration.
+    GovernanceToken,
 }
 
 // ─────────────────────────────────────────────
@@ -1063,6 +1066,46 @@ impl VolatilityShield {
         );
 
         Ok(next_nonce)
+    }
+
+    // ── Governance Token (SC-29) ──────────────
+
+    /// Set the governance token address. Admin-only.
+    pub fn set_governance_token(env: Env, caller: Address, token: Address) {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            panic!("Unauthorized");
+        }
+        env.storage().instance().set(&DataKey::GovernanceToken, &token);
+        env.events().publish((symbol_short!("GovToken"), symbol_short!("set")), token);
+    }
+
+    /// Read the governance token address if set.
+    pub fn get_governance_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::GovernanceToken)
+    }
+
+    /// Calculate the voting power of a user based on their proportional asset backing.
+    pub fn get_voting_power(env: Env, user: Address) -> i128 {
+        let user_shares = Self::balance(env.clone(), user);
+        if user_shares == 0 {
+            return 0;
+        }
+
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+
+        if total_shares == 0 {
+            return 0;
+        }
+
+        (user_shares * total_assets) / total_shares
+    }
+
+    /// Cast a vote. Currently unimplemented.
+    pub fn cast_vote(env: Env, voter: Address, _proposal_id: u32, _support: bool) {
+        voter.require_auth();
+        panic_with_error!(&env, Error::NotImplemented);
     }
 
     // ── Contract Upgrade ──────────────────────

@@ -1174,3 +1174,55 @@ fn test_upgrade() {
     assert_eq!(client.total_assets(), 5000);
     assert_eq!(client.fee_percentage(), 500);
 }
+
+#[test]
+fn test_get_voting_power_proportional() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.set_total_shares(&1000);
+    client.set_total_assets(&5000); // 1 share = 5 assets
+
+    // Mock balance
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&DataKey::Balance(user1.clone()), &200i128); // 200 shares
+        env.storage().persistent().set(&DataKey::Balance(user2.clone()), &800i128); // 800 shares
+    });
+
+    // Proportional voting power
+    // User1: 200 * 5000 / 1000 = 1000
+    // User2: 800 * 5000 / 1000 = 4000
+    assert_eq!(client.get_voting_power(&user1), 1000);
+    assert_eq!(client.get_voting_power(&user2), 4000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #15)")]
+fn test_cast_vote_stub() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let voter = Address::generate(&env);
+    client.cast_vote(&voter, &1u32, &true);
+}
