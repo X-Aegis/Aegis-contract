@@ -122,15 +122,17 @@ jobs:
           echo "═══════════════════════════════════════════"
           echo "🛑 DEBOUNCE CHECK: Preventing Double Spam"
           echo "═══════════════════════════════════════════"
-          LAST_BOT_COMMENT_TIME=$(gh pr view $PR_NUMBER --json comments -q '.comments | map(select(.author.login == "bbkenny")) | last | .createdAt' 2>/dev/null || echo "")
-          if [ "$LAST_BOT_COMMENT_TIME" != "null" ] && [ -n "$LAST_BOT_COMMENT_TIME" ]; then
-            NOW=$(date +%s)
-            LAST_TIME=$(date -d "$LAST_BOT_COMMENT_TIME" +%s)
-            DIFF=$((NOW - LAST_TIME))
-            if [ "$DIFF" -lt 120 ]; then
-              echo "✅ Bot just commented $DIFF seconds ago. Skipping AI review and comment to keep checks green!"
-              echo "true" > skip_comment.txt
-              exit 0
+          if [ "${{ github.event_name }}" == "issue_comment" ]; then
+            LAST_BOT_COMMENT_TIME=$(gh pr view $PR_NUMBER --json comments -q '.comments | map(select(.author.login == "bbkenny")) | last | .createdAt' 2>/dev/null || echo "")
+            if [ "$LAST_BOT_COMMENT_TIME" != "null" ] && [ -n "$LAST_BOT_COMMENT_TIME" ]; then
+              NOW=$(date +%s)
+              LAST_TIME=$(date -d "$LAST_BOT_COMMENT_TIME" +%s)
+              DIFF=$((NOW - LAST_TIME))
+              if [ "$DIFF" -lt 300 ]; then
+                echo "✅ Bot just commented $DIFF seconds ago. Skipping AI review for this issue_comment to prevent double-spam!"
+                echo "true" > skip_comment.txt
+                exit 0
+              fi
             fi
           fi
 
@@ -195,6 +197,12 @@ jobs:
           If the diff successfully and safely implements the requirements described in the issue, you must output "PASS" on the first line, followed by a short, friendly, and casual approval comment thanking the contributor for their work.
           If the diff is flawed, misses key requirements, introduces obvious bugs, OR if the contributor asks an architectural/blocking question that requires your input before merging, you must output "FAIL" on the first line, followed by a polite, constructive explanation or answer.
           IMPORTANT: If the contributor asks a non-blocking question in the description or comments, you can still output "PASS", but you MUST answer their question conversationally within your approval comment!
+          
+          CRITICAL VERIFICATION RULES:
+          1. You MUST strictly evaluate the DIFF against the ISSUE REQUIREMENTS.
+          2. Do NOT blindly trust the user's comments. If the user claims to have fixed something, but the DIFF does not show it, you MUST output "FAIL".
+          3. If the issue explicitly requires specific files (e.g., SECURITY.md) or configurations, and they are missing from the diff, you MUST output "FAIL".
+
           CRITICAL: Act strictly as the human core maintainer. Do NOT mention you are an AI, bot, or automated system. Follow these rules to sound completely natural and human:
           - You MUST start your response by tagging the contributor: @${author}.
           - Use a conversational, casual tone like a real dev typing a quick GitHub comment.
