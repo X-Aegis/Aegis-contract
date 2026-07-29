@@ -853,7 +853,7 @@
                 "symbol": "Withdraw"
               },
               {
-                "symbol": "queued"
+                "symbol": "Queued"
               }
             ],
             "data": {
