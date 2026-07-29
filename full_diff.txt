@@ -1,0 +1,117 @@
+commit 459fd70393ac89b03e268b9de0f53dfcc6f95b98
+Author: Richiey1 <ojodamilarey@gmail.com>
+Date:   Fri Jul 24 02:10:44 2026 +0100
+
+    fix(contract): address event enrichment feedback
+
+diff --git a/docs/EVENT_SCHEMA.md b/docs/EVENT_SCHEMA.md
+new file mode 100644
+index 0000000..fceeb07
+--- /dev/null
++++ b/docs/EVENT_SCHEMA.md
+@@ -0,0 +1,48 @@
++# Event Schema
++
++This document details the standardized events emitted by the Aegis-contract for indexing purposes.
++
++All event topics use PascalCase formatting.
++
++## Deposit
++Emitted when a user deposits assets into the vault.
++
++**Topics:**
++- `Deposit`
++- `from`: Address
++
++**Payload:** (Tuple)
++1. `amount`: i128 (Assets deposited)
++2. `shares_to_mint`: i128 (Shares minted to the user)
++3. `new_total_assets`: i128 (Total assets in vault after deposit)
++4. `new_total_shares`: i128 (Total shares in vault after deposit)
++5. `share_price_at_time`: i128 (Scaled share price `total_assets * 1e7 / total_shares`)
++
++---
++
++## Withdraw
++Emitted when a user withdraws assets from the vault.
++
++**Topics:**
++- `Withdraw`
++- `from`: Address
++
++**Payload:** (Tuple)
++1. `shares`: i128 (Shares burned by the user)
++2. `net_assets`: i128 (Assets returned to the user, after fees)
++3. `fee`: i128 (Fee collected)
++4. `new_total_assets`: i128 (Total assets in vault after withdrawal)
++5. `new_total_shares`: i128 (Total shares in vault after withdrawal)
++6. `share_price_at_time`: i128 (Scaled share price `total_assets * 1e7 / total_shares`)
++
++---
++
++## VaultSnapshot
++Emitted at the end of state-altering operations (like `Rebalance` and `Harvest`) to provide indexers with an updated view of the vault's health.
++
++**Topics:**
++- `VaultSnapshot`
++
++**Payload:** (Tuple)
++1. `total_assets_after`: i128 (Total assets in the vault)
++2. `total_shares_after`: i128 (Total shares minted)
+diff --git a/smartcontract/contracts/volatility_shield/src/lib.rs b/smartcontract/contracts/volatility_shield/src/lib.rs
+index 5f737c8..83764cf 100644
+--- a/smartcontract/contracts/volatility_shield/src/lib.rs
++++ b/smartcontract/contracts/volatility_shield/src/lib.rs
+@@ -181,9 +181,10 @@ impl VolatilityShield {
+         Self::set_total_shares(env.clone(), new_total_shares);
+         Self::set_total_assets(env.clone(), new_total_assets);
+ 
++        let share_price_at_time = if total_shares == 0 { 10_000_000 } else { total_assets * 10_000_000 / total_shares };
+         env.events().publish(
+-            (symbol_short!("Deposit"), from.clone()),
+-            (amount, shares_to_mint, new_total_assets, new_total_shares)
++            (soroban_sdk::Symbol::new(&env, "Deposit"), from.clone()),
++            (amount, shares_to_mint, new_total_assets, new_total_shares, share_price_at_time)
+         );
+     }
+ 
+@@ -225,12 +226,13 @@ impl VolatilityShield {
+         if fee > 0 {
+             let treasury_addr = Self::treasury(&env);
+             token_client.transfer(&contract_addr, &treasury_addr, &fee);
+-            env.events().publish((symbol_short!("Fee"), symbol_short!("collect")), fee);
++            env.events().publish((soroban_sdk::Symbol::new(&env, "Fee"), soroban_sdk::Symbol::new(&env, "Collect")), fee);
+         }
+ 
++        let share_price_at_time = if total_shares == 0 { 10_000_000 } else { total_assets * 10_000_000 / total_shares };
+         env.events().publish(
+-            (symbol_short!("Withdraw"), from.clone()),
+-            (shares, net_assets, fee, new_total_assets, new_total_shares)
++            (soroban_sdk::Symbol::new(&env, "Withdraw"), from.clone()),
++            (shares, net_assets, fee, new_total_assets, new_total_shares, share_price_at_time)
+         );
+   }
+ 
+@@ -416,7 +418,10 @@ impl VolatilityShield {
+             }
+         }
+         
+-        env.events().publish((symbol_short!("Rebalance"),), allocations);
++        let final_assets = Self::total_assets(&env);
++        let final_shares = Self::total_shares(&env);
++        env.events().publish((soroban_sdk::Symbol::new(&env, "Rebalance"),), allocations);
++        env.events().publish((soroban_sdk::Symbol::new(&env, "VaultSnapshot"),), (final_assets, final_shares));
+     }
+ 
+     // ── Strategy Management ───────────────────
+@@ -591,7 +596,9 @@ impl VolatilityShield {
+         }
+ 
+         let final_assets = Self::total_assets(&env);
+-        env.events().publish((symbol_short!("harvest"),), (total_yield, final_assets));
++        let final_shares = Self::total_shares(&env);
++        env.events().publish((soroban_sdk::Symbol::new(&env, "Harvest"),), (total_yield, final_assets));
++        env.events().publish((soroban_sdk::Symbol::new(&env, "VaultSnapshot"),), (final_assets, final_shares));
+         Ok(total_yield)
+     }
+ 

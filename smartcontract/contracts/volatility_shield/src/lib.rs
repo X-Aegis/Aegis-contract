@@ -14,7 +14,7 @@
     clippy::cast_possible_truncation
 )]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token,
     Address, Env, Map, Vec,
 };
 
@@ -382,7 +382,7 @@ impl VolatilityShield {
         );
 
         env.events()
-            .publish((symbol_short!("Withdraw"), symbol_short!("queued")), shares);
+            .publish((soroban_sdk::Symbol::new(&env, "Withdraw"), soroban_sdk::Symbol::new(&env, "Queued")), shares);
 
         Ok(withdrawal_id)
     }
@@ -462,7 +462,7 @@ impl VolatilityShield {
 
         if current_time > timestamp && current_time - timestamp > max_staleness {
             env.events().publish(
-                (symbol_short!("Oracle"), symbol_short!("Reject")),
+                (soroban_sdk::Symbol::new(&env, "Oracle"), soroban_sdk::Symbol::new(&env, "Reject")),
                 timestamp,
             );
             panic!("Stale oracle data");
@@ -518,7 +518,7 @@ impl VolatilityShield {
 
         if current_time > last_update && current_time - last_update > max_staleness {
             env.events().publish(
-                (symbol_short!("Oracle"), symbol_short!("Reject")),
+                (soroban_sdk::Symbol::new(&env, "Oracle"), soroban_sdk::Symbol::new(&env, "Reject")),
                 last_update,
             );
             panic!("Stale oracle data");
@@ -587,7 +587,7 @@ impl VolatilityShield {
             .set(&DataKey::Strategies, &strategies);
 
         env.events().publish(
-            (symbol_short!("Strategy"), symbol_short!("added")),
+            (soroban_sdk::Symbol::new(&env, "Strategy"), soroban_sdk::Symbol::new(&env, "Added")),
             strategy,
         );
 
@@ -622,7 +622,7 @@ impl VolatilityShield {
             // now reports zero (or if it is already flagged)
             if actual == 0 && last_known > 0 {
                 env.events().publish(
-                    (symbol_short!("Strategy"), symbol_short!("flagged")),
+                    (soroban_sdk::Symbol::new(&env, "Strategy"), soroban_sdk::Symbol::new(&env, "Flagged")),
                     strategy_addr.clone(),
                 );
                 // Persist flagged status as -1 sentinel
@@ -654,7 +654,7 @@ impl VolatilityShield {
             .set(&DataKey::StrategyHealth(strategy.clone()), &(-1i128));
 
         env.events().publish(
-            (symbol_short!("Strategy"), symbol_short!("flagged")),
+            (soroban_sdk::Symbol::new(&env, "Strategy"), soroban_sdk::Symbol::new(&env, "Flagged")),
             strategy,
         );
 
@@ -710,7 +710,7 @@ impl VolatilityShield {
             .remove(&DataKey::StrategyHealth(strategy.clone()));
 
         env.events().publish(
-            (symbol_short!("Strategy"), symbol_short!("removed")),
+            (soroban_sdk::Symbol::new(&env, "Strategy"), soroban_sdk::Symbol::new(&env, "Removed")),
             strategy,
         );
 
@@ -799,7 +799,7 @@ impl VolatilityShield {
             .set(&DataKey::FlashLoanProviders, &providers);
 
         env.events().publish(
-            (symbol_short!("FLProvdr"), symbol_short!("added")),
+            (soroban_sdk::Symbol::new(&env, "FlashLoanProvider"), soroban_sdk::Symbol::new(&env, "Added")),
             provider,
         );
         Ok(())
@@ -831,7 +831,7 @@ impl VolatilityShield {
             .set(&DataKey::FlashLoanProviders, &providers);
 
         env.events().publish(
-            (symbol_short!("FLProvdr"), symbol_short!("removed")),
+            (soroban_sdk::Symbol::new(&env, "FlashLoanProvider"), soroban_sdk::Symbol::new(&env, "Removed")),
             provider,
         );
         Ok(())
@@ -918,7 +918,7 @@ impl VolatilityShield {
         // Rebalance window: the borrowed `amount` is now held by the vault and
         // available to the rebalance flow before being repaid in this same tx.
         env.events()
-            .publish((symbol_short!("FlashLn"), symbol_short!("rebal")), amount);
+            .publish((soroban_sdk::Symbol::new(&env, "FlashLoan"), soroban_sdk::Symbol::new(&env, "Rebalance")), amount);
 
         // Repay principal + fee to the provider atomically (a token transfer,
         // not a call into the provider, so the vault is never re-entered).
@@ -930,7 +930,7 @@ impl VolatilityShield {
         );
 
         env.events().publish(
-            (symbol_short!("FlashLn"), symbol_short!("repaid")),
+            (soroban_sdk::Symbol::new(&env, "FlashLoan"), soroban_sdk::Symbol::new(&env, "Repaid")),
             repayment,
         );
     }
@@ -1020,7 +1020,7 @@ impl VolatilityShield {
         }
         env.storage().instance().set(&DataKey::BenchmarkRate, &bps);
         env.events()
-            .publish((symbol_short!("Benchmark"), symbol_short!("set")), bps);
+            .publish((soroban_sdk::Symbol::new(&env, "Benchmark"), soroban_sdk::Symbol::new(&env, "Set")), bps);
     }
 
     /// Read the configured benchmark rate in BPS (defaults to 0).
@@ -1042,7 +1042,7 @@ impl VolatilityShield {
             .instance()
             .set(&DataKey::CurrentVaultApy, &bps);
         env.events()
-            .publish((symbol_short!("VaultApy"), symbol_short!("set")), bps);
+            .publish((soroban_sdk::Symbol::new(&env, "VaultApy"), soroban_sdk::Symbol::new(&env, "Set")), bps);
     }
 
     /// Read the current vault APY in BPS (defaults to 0).
@@ -1225,7 +1225,7 @@ impl VolatilityShield {
             .set(&DataKey::CrossChainEndpoints, &endpoints);
 
         env.events()
-            .publish((symbol_short!("XChain"), symbol_short!("endp_add")), id);
+            .publish((soroban_sdk::Symbol::new(&env, "CrossChain"), soroban_sdk::Symbol::new(&env, "EndpointAdded")), id);
 
         Ok(id)
     }
@@ -1267,7 +1267,7 @@ impl VolatilityShield {
             .set(&DataKey::CrossChainEndpoints, &new_endpoints);
 
         env.events().publish(
-            (symbol_short!("XChain"), symbol_short!("endp_rem")),
+            (soroban_sdk::Symbol::new(&env, "CrossChain"), soroban_sdk::Symbol::new(&env, "EndpointRemoved")),
             endpoint_id,
         );
 
@@ -1346,7 +1346,7 @@ impl VolatilityShield {
 
         // Emit cross-chain rebalance event
         env.events().publish(
-            (symbol_short!("XChain"), symbol_short!("rebalance")),
+            (soroban_sdk::Symbol::new(&env, "CrossChain"), soroban_sdk::Symbol::new(&env, "Rebalance")),
             (next_nonce, asset, amount, destination_chain),
         );
 
@@ -1362,7 +1362,7 @@ impl VolatilityShield {
             panic!("Unauthorized");
         }
         env.storage().instance().set(&DataKey::GovernanceToken, &token);
-        env.events().publish((symbol_short!("GovToken"), symbol_short!("set")), token);
+        env.events().publish((soroban_sdk::Symbol::new(&env, "GovToken"), soroban_sdk::Symbol::new(&env, "Set")), token);
     }
 
     /// Read the governance token address if set.
