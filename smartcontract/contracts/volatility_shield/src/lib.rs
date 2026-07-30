@@ -330,8 +330,9 @@ impl VolatilityShield {
     // ── Withdrawal Queue ───────────────────────
 
     /// Queue a withdrawal when `shares` exceeds the configured threshold.
-    /// The withdrawal is stored in the pending queue and must be processed
-    /// by the admin/oracle via `process_queued_withdrawal`.
+    /// The withdrawal is stored in the pending queue (keyed by its assigned
+    /// `withdrawal_id`) and must be processed by the admin via
+    /// `process_queued_withdrawal`.
     pub fn queue_withdraw(env: Env, from: Address, shares: i128) -> Result<u32, Error> {
         if shares <= 0 {
             panic!("shares to withdraw must be positive");
@@ -371,9 +372,18 @@ impl VolatilityShield {
             processed: false,
         };
 
+        // Store queued withdrawals in a map keyed by withdrawal_id so that
+        // multiple concurrent pending withdrawals coexist instead of
+        // clobbering one another under a single flat key.
+        let mut pending_withdrawals: Map<u32, PendingWithdrawal> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingWithdrawals)
+            .unwrap_or_else(|| Map::new(&env));
+        pending_withdrawals.set(withdrawal_id, pending.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::PendingWithdrawals, &pending);
+            .set(&DataKey::PendingWithdrawals, &pending_withdrawals);
 
         // Deduct shares immediately so they cannot be double-spent
         env.storage().persistent().set(
@@ -381,10 +391,103 @@ impl VolatilityShield {
             &(current_balance.checked_sub(shares).unwrap()),
         );
 
-        env.events()
-            .publish((soroban_sdk::Symbol::new(&env, "Withdraw"), soroban_sdk::Symbol::new(&env, "Queued")), shares);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Withdraw"), soroban_sdk::Symbol::new(&env, "Queued")),
+            (withdrawal_id, from.clone(), shares, pending.created_at),
+        );
 
         Ok(withdrawal_id)
+    }
+
+    /// Process a previously queued withdrawal. Admin-only.
+    ///
+    /// Converts the queued `shares` to assets at the *current* share price,
+    /// applies the standard withdrawal fee, transfers the net assets to the
+    /// original requester, and marks the entry as processed so it cannot be
+    /// settled twice.
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` if `caller` is not the admin.
+    /// * `Error::WithdrawalNotFound` if `withdrawal_id` has no queued entry.
+    /// * `Error::WithdrawalAlreadyProcessed` if the entry was already settled.
+    pub fn process_queued_withdrawal(
+        env: Env,
+        caller: Address,
+        withdrawal_id: u32,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        let admin = Self::get_admin(&env);
+        if caller != admin {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut pending_withdrawals: Map<u32, PendingWithdrawal> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingWithdrawals)
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut pending = pending_withdrawals
+            .get(withdrawal_id)
+            .ok_or(Error::WithdrawalNotFound)?;
+
+        if pending.processed {
+            return Err(Error::WithdrawalAlreadyProcessed);
+        }
+
+        let assets_to_withdraw = Self::convert_to_assets(env.clone(), pending.shares);
+        let (net_assets, fee) = Self::take_fees(&env, assets_to_withdraw);
+
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+        let new_total_shares = total_shares.checked_sub(pending.shares).unwrap();
+        let new_total_assets = total_assets.checked_sub(assets_to_withdraw).unwrap();
+        Self::set_total_shares(env.clone(), new_total_shares);
+        Self::set_total_assets(env.clone(), new_total_assets);
+
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .expect("Token not initialized");
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract_addr = env.current_contract_address();
+
+        // 1. Transfer net assets to the original requester
+        token_client.transfer(&contract_addr, &pending.from, &net_assets);
+
+        // 2. Transfer fee to treasury if any
+        if fee > 0 {
+            let treasury_addr = Self::treasury(&env);
+            token_client.transfer(&contract_addr, &treasury_addr, &fee);
+            env.events().publish(
+                (soroban_sdk::Symbol::new(&env, "Fee"), soroban_sdk::Symbol::new(&env, "Collect")),
+                fee,
+            );
+        }
+
+        pending.processed = true;
+        pending_withdrawals.set(withdrawal_id, pending.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingWithdrawals, &pending_withdrawals);
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Withdraw"), soroban_sdk::Symbol::new(&env, "Processed")),
+            (withdrawal_id, pending.from.clone(), pending.shares, net_assets, fee, new_total_assets, new_total_shares),
+        );
+
+        Ok(())
+    }
+
+    /// Returns a queued withdrawal by its `withdrawal_id`, if one exists.
+    pub fn get_pending_withdrawal(env: Env, withdrawal_id: u32) -> Option<PendingWithdrawal> {
+        let pending_withdrawals: Map<u32, PendingWithdrawal> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingWithdrawals)
+            .unwrap_or_else(|| Map::new(&env));
+        pending_withdrawals.get(withdrawal_id)
     }
 
     /// Set the withdrawal queue threshold. Admin-only.

@@ -1139,6 +1139,216 @@ fn test_queue_withdraw_insufficient_shares_rejected() {
 }
 
 #[test]
+fn test_queue_withdraw_multiple_entries_do_not_overwrite() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&2_000);
+    client.set_balance(&admin, &2_000);
+
+    client.set_withdraw_queue_threshold(&admin, &500);
+
+    // Queue two separate withdrawals from the same account.
+    let id1 = client.queue_withdraw(&admin, &600);
+    let id2 = client.queue_withdraw(&admin, &700);
+
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    assert_ne!(id1, id2);
+
+    // Both must be independently retrievable — the second queue_withdraw
+    // call must not have clobbered the first (the regression this test
+    // guards against).
+    let pending1 = client.get_pending_withdrawal(&id1).unwrap();
+    let pending2 = client.get_pending_withdrawal(&id2).unwrap();
+
+    assert_eq!(pending1.from, admin);
+    assert_eq!(pending1.shares, 600);
+    assert!(!pending1.processed);
+
+    assert_eq!(pending2.from, admin);
+    assert_eq!(pending2.shares, 700);
+    assert!(!pending2.processed);
+
+    // Shares were deducted for both withdrawals.
+    assert_eq!(client.balance(&admin), 700);
+}
+
+#[test]
+fn test_queue_withdraw_multiple_accounts_independent() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&2_000);
+    client.set_balance(&admin, &1_000);
+    client.set_balance(&user2, &1_000);
+
+    client.set_withdraw_queue_threshold(&admin, &500);
+
+    let id1 = client.queue_withdraw(&admin, &600);
+    let id2 = client.queue_withdraw(&user2, &900);
+
+    let pending1 = client.get_pending_withdrawal(&id1).unwrap();
+    let pending2 = client.get_pending_withdrawal(&id2).unwrap();
+
+    assert_eq!(pending1.from, admin);
+    assert_eq!(pending1.shares, 600);
+    assert_eq!(pending2.from, user2);
+    assert_eq!(pending2.shares, 900);
+}
+
+#[test]
+fn test_process_queued_withdrawal_transfers_assets() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    client.set_withdraw_queue_threshold(&admin, &500);
+
+    let id = client.queue_withdraw(&admin, &600);
+
+    let balance_before = tc.balance(&admin);
+    client.process_queued_withdrawal(&admin, &id);
+    let balance_after = tc.balance(&admin);
+
+    // 600 shares out of 1000 total shares backed by 100_000 assets = 60_000 assets.
+    assert_eq!(balance_after - balance_before, 60_000);
+
+    let pending = client.get_pending_withdrawal(&id).unwrap();
+    assert!(pending.processed);
+
+    assert_eq!(client.total_shares(), 400);
+    assert_eq!(client.total_assets(), 40_000);
+}
+
+#[test]
+fn test_process_queued_withdrawal_not_found() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, _sac, _tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    let result = client.try_process_queued_withdrawal(&admin, &999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_process_queued_withdrawal_already_processed_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    client.set_withdraw_queue_threshold(&admin, &500);
+
+    let id = client.queue_withdraw(&admin, &600);
+    client.process_queued_withdrawal(&admin, &id);
+
+    let result = client.try_process_queued_withdrawal(&admin, &id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_process_queued_withdrawal_unauthorized_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    client.set_withdraw_queue_threshold(&admin, &500);
+
+    let id = client.queue_withdraw(&admin, &600);
+
+    let result = client.try_process_queued_withdrawal(&not_admin, &id);
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_set_and_get_queue_threshold() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
