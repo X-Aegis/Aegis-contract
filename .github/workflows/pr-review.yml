@@ -40,6 +40,11 @@ jobs:
               gh pr close $PR_NUMBER
               exit 1
             fi
+            if echo "$CHANGED_FILES" | grep -q "^\.gitignore"; then
+              gh pr comment $PR_NUMBER --body "🚨 **SECURITY ALERT**: External contributors are not permitted to modify \`.gitignore\` to prevent accidental exposure of \`.env.deploy\`. Please revert these changes to proceed."
+              gh pr close $PR_NUMBER
+              exit 1
+            fi
           fi
 
       - name: 🔍 Check for Issue Link

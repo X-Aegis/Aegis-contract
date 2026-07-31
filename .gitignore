@@ -2,3 +2,4 @@ target/
 ** /target/
 smartcontract/target/
 .soroban/
+.env.deploy

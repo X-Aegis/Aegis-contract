@@ -108,4 +108,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
+## 🚨 Security Policy for Contributors
+
+**Do NOT modify `.gitignore` to expose `.env.deploy`.**
+The `.env.deploy` file contains private deployment keys and must remain git-ignored at all times. Any Pull Request that attempts to remove `.env.deploy` from the ignore list, or otherwise alter this security measure, will be automatically flagged as a security violation and closed immediately by the CI bot.
+
+---
+
 *Project maintained by @bbkenny.*
