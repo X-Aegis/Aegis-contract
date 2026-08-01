@@ -13,6 +13,11 @@
 
 > **A Stablecoin Volatility Shield for Weak Currencies.**
 
+## 🚀 Deployment Status
+- **Network:** Stellar Testnet
+- **Smart Contract ID:** `CDWW6ZYH4UEOVR2DQEKBL742DFDR6QGVK26UOBNRBJDSXBYK2S6M7VWH`
+- **Explorer:** [Stellar Expert](https://stellar.expert/explorer/testnet/contract/CDWW6ZYH4UEOVR2DQEKBL742DFDR6QGVK26UOBNRBJDSXBYK2S6M7VWH)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Built on Stellar](https://img.shields.io/badge/Built%20on-Stellar%20Soroban-purple)](https://soroban.stellar.org)
 
