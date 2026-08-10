@@ -9,10 +9,13 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
 
-
 permissions:
   contents: write
   pull-requests: write
+
+env:
+  # Model in ONE place — used for both the log line and the API call so they cannot drift.
+  AI_MODEL: "${{ secrets.AI_MODEL != '' && secrets.AI_MODEL || 'claude-sonnet-4-6' }}"
 
 jobs:
   audit:
@@ -28,7 +31,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
-          allow-unsafe-pr-checkout: true
 
       - name: ❌ Check for Workflow Tampering
         run: |
@@ -41,7 +43,7 @@ jobs:
               exit 1
             fi
             if echo "$CHANGED_FILES" | grep -q "^\.gitignore"; then
-              gh pr comment $PR_NUMBER --body "🚨 **SECURITY ALERT**: External contributors are not permitted to modify \`.gitignore\` to prevent accidental exposure of \`.env.deploy\`. Please revert these changes to proceed."
+              gh pr comment $PR_NUMBER --body "🚨 **SECURITY ALERT**: External contributors are not permitted to modify \`.gitignore\` to prevent accidental exposure of environment/deployment secrets. Please revert these changes to proceed."
               gh pr close $PR_NUMBER
               exit 1
             fi
@@ -64,6 +66,39 @@ jobs:
             exit 1
           fi
 
+      - name: 👥 Assignment Gate (Issue must be assigned to PR author)
+        run: |
+          PR_BODY=$(gh pr view $PR_NUMBER --json body -q .body)
+          ISSUE_NUM=$(echo "$PR_BODY" | grep -oEi "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+" | head -n1 | grep -oE "[0-9]+")
+
+          if ! gh issue view "$ISSUE_NUM" --json state,title,assignees > /tmp/issue.json 2>/dev/null; then
+            gh pr comment $PR_NUMBER --body "hey @${{ env.AUTHOR }}, i couldn't find the linked issue #$ISSUE_NUM. please double-check the issue number in the PR description."
+            gh pr review $PR_NUMBER --request-changes -b "Linked issue #$ISSUE_NUM not found. Fix the issue reference so we can verify assignment."
+            exit 1
+          fi
+
+          STATE=$(jq -r .state /tmp/issue.json)
+          if [ "$STATE" != "OPEN" ]; then
+            gh pr comment $PR_NUMBER --body "hey @${{ env.AUTHOR }}, the linked issue #$ISSUE_NUM is \`$STATE\`. please reopen it or link an open issue so we can proceed."
+            gh pr review $PR_NUMBER --request-changes -b "Linked issue #$ISSUE_NUM is $STATE, so there's nothing to work against. Link an open issue to continue."
+            exit 1
+          fi
+
+          ASSIGNEES=$(jq -r '[.assignees[].login] | join(",")' /tmp/issue.json)
+          if [ -z "$ASSIGNEES" ]; then
+            gh pr comment $PR_NUMBER --body "hey @${{ env.AUTHOR }}, issue #$ISSUE_NUM isn't assigned to anyone yet. please get yourself assigned to the issue before submitting work."
+            gh pr review $PR_NUMBER --request-changes -b "Issue #$ISSUE_NUM is unassigned. Get assigned to the issue (or ask a maintainer to assign you) before submitting."
+            exit 1
+          fi
+
+          if ! echo ",$ASSIGNEES," | grep -q ",${{ env.AUTHOR }},"; then
+            gh pr comment $PR_NUMBER --body "hey @${{ env.AUTHOR }}, issue #$ISSUE_NUM is assigned to \`$ASSIGNEES\` but not to you. only the assigned contributor can have work merged for this issue."
+            gh pr review $PR_NUMBER --request-changes -b "Issue #$ISSUE_NUM is assigned to $ASSIGNEES, not you. Work must be done by the assignee. Ask a maintainer to reassign if intended."
+            exit 1
+          fi
+
+          echo "✅ Assignment verified: issue #$ISSUE_NUM is assigned to @${{ env.AUTHOR }}."
+
       - name: 🚨 Check for Merge Conflicts
         run: |
           MERGEABLE=$(gh pr view $PR_NUMBER --json mergeable -q .mergeable)
@@ -81,12 +116,45 @@ jobs:
             exit 1
           fi
 
+      - name: 🔑 Token Pre-flight (merge permission check)
+        run: |
+          CAN_PUSH=$(gh api repos/${{ github.repository }} --jq '.permissions.push' 2>/dev/null || echo "false")
+          if [ "$CAN_PUSH" != "true" ]; then
+            echo "❌ MAINTAINER_TOKEN is not set (or lacks push rights). Falling back to GITHUB_TOKEN would block merges."
+            gh pr comment $PR_NUMBER --body "⚠️ **Token misconfiguration**: the automation token (\`MAINTAINER_TOKEN\`) is missing or lacks push permission on this repository, so auto-merge is disabled. Please configure \`MAINTAINER_TOKEN\` in repo/org secrets."
+            exit 1
+          fi
+          echo "✅ Token pre-flight OK: merge permission confirmed."
+
+      - name: 🕓 Already-Reviewed SHA Check (dedupe)
+        run: |
+          HEAD_SHA=$(gh pr view $PR_NUMBER --json headRefOid -q .headRefOid)
+          LAST_REVIEW_SHA=$(gh pr view $PR_NUMBER --json reviews -q '[.reviews[] | select(.author.login == "bbkenny")] | last | .commit_id' 2>/dev/null || echo "")
+          if [ -n "$LAST_REVIEW_SHA" ] && [ "$LAST_REVIEW_SHA" = "$HEAD_SHA" ]; then
+            echo "🕓 Bot already reviewed head SHA $HEAD_SHA. Skipping re-review (no new commits)."
+            echo "SKIP_REVIEW=true" >> "$GITHUB_ENV"
+          else
+            echo "🕓 Head SHA $HEAD_SHA not reviewed yet. Proceeding with review."
+            echo "SKIP_REVIEW=false" >> "$GITHUB_ENV"
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
           components: clippy
+
+      - name: Cache Cargo Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Lint with Clippy
         id: lint_review
@@ -95,19 +163,19 @@ jobs:
           cd smartcontract
           cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Review Core Logic
+      - name: Run Tests & Build Contracts
         id: build_review
         continue-on-error: true
         run: |
           cd smartcontract
-          cargo test --all && cargo build --target wasm32-unknown-unknown --release
+          cargo test --all
+          cargo build --target wasm32-unknown-unknown --release
 
       - name: ❌ Handle Lint Failure
         if: steps.lint_review.outcome == 'failure'
         run: |
           PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
           gh pr comment $PR_NUMBER --body "Hey @${{ env.AUTHOR }}, the linter (\`cargo clippy\`) flagged some warnings in '$PR_TITLE'. Please run \`cargo clippy --all-targets --all-features -- -D warnings\` locally and fix the issues before pushing again."
-
           exit 1
 
       - name: ❌ Handle Review Failure
@@ -128,7 +196,7 @@ jobs:
 
       - name: 🤖 AI Code Review (Claude)
         id: ai_review
-        if: steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success'
+        if: env.SKIP_REVIEW != 'true' && steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -136,9 +204,7 @@ jobs:
           echo "🤖 AI REVIEW: Starting Claude Code Review"
           echo "═══════════════════════════════════════════"
 
-          echo "═══════════════════════════════════════════"
           echo "🛑 DEBOUNCE CHECK: Preventing Double Spam"
-          echo "═══════════════════════════════════════════"
           if [ "${{ github.event_name }}" == "issue_comment" ]; then
             LAST_BOT_COMMENT_TIME=$(gh pr view $PR_NUMBER --json comments -q '.comments | map(select(.author.login == "bbkenny")) | last | .createdAt' 2>/dev/null || echo "")
             if [ "$LAST_BOT_COMMENT_TIME" != "null" ] && [ -n "$LAST_BOT_COMMENT_TIME" ]; then
@@ -147,27 +213,23 @@ jobs:
               DIFF=$((NOW - LAST_TIME))
               if [ "$DIFF" -lt 300 ]; then
                 echo "✅ Bot just commented $DIFF seconds ago. Skipping AI review for this issue_comment to prevent double-spam!"
-                echo "true" > skip_comment.txt
+                echo "AI_RESULT=SKIP" >> "$GITHUB_ENV"
                 exit 0
               fi
             fi
           fi
 
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "⚠️ No ANTHROPIC_API_KEY found — skipping AI review."
-            echo "   Add ANTHROPIC_API_KEY to org secrets to enable AI reviews."
+            echo "⚠️ No ANTHROPIC_API_KEY found — AI review unavailable."
+            gh pr comment $PR_NUMBER --body "Automated AI review is unavailable (ANTHROPIC_API_KEY not configured). Please review this PR manually."
+            echo "AI_RESULT=SKIP" >> "$GITHUB_ENV"
             exit 0
           fi
           echo "✅ ANTHROPIC_API_KEY is set (length: ${#ANTHROPIC_API_KEY} chars)"
+          echo "✅ AI model: ${{ env.AI_MODEL }}"
 
           PR_BODY=$(gh pr view $PR_NUMBER --json body -q .body)
-          ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oEi "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+" | head -n 1 | grep -oE "[0-9]+")
-
-          if [ -z "$ISSUE_NUMBER" ]; then
-            echo "⚠️ No linked issue found in PR body — skipping AI review."
-            echo "   AI review requires a linked issue (e.g., 'Closes #42') for context."
-            exit 0
-          fi
+          ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oEi "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+" | head -n1 | grep -oE "[0-9]+")
 
           echo "📋 Linked Issue: #$ISSUE_NUMBER"
           echo "📎 PR Number: #$PR_NUMBER"
@@ -175,6 +237,8 @@ jobs:
           ISSUE_BODY=$(gh issue view $ISSUE_NUMBER --json body -q .body)
           PR_DIFF=$(gh pr diff $PR_NUMBER)
           PR_COMMENTS=$(gh pr view $PR_NUMBER --json comments --jq '[.comments[].body] | join("\n\n---\n\n")')
+          DIFF_STATS=$(gh pr diff $PR_NUMBER --name-only | wc -l)
+          DIFF_LINES=$(gh pr diff $PR_NUMBER | wc -l)
 
           echo "$ISSUE_BODY" > issue.txt
           echo "$PR_DIFF" > diff.txt
@@ -182,6 +246,7 @@ jobs:
           echo "$PR_COMMENTS" > pr_comments.txt
           echo "📏 Issue body: $(wc -c < issue.txt) bytes"
           echo "📏 PR diff: $(wc -c < diff.txt) bytes"
+          echo "📏 Files changed: $DIFF_STATS, diff lines: $DIFF_LINES"
 
           cat << 'EOF' > ai_review.js
           const fs = require('fs');
@@ -194,9 +259,11 @@ jobs:
           const prNumber = process.env.PR_NUMBER;
           const apiKey = process.env.ANTHROPIC_API_KEY;
           const author = process.env.AUTHOR;
+          const model = process.env.AI_MODEL || 'claude-sonnet-4-6';
+          const diffStats = process.env.DIFF_STATS;
+          const diffLines = process.env.DIFF_LINES;
 
-          const prompt = `You are an expert Senior Developer reviewing a Pull Request.
-          Your task is to verify if the PR successfully solves the requirements of the linked Issue.
+          const prompt = `You are a critical senior smart-contract engineer AND a QA reviewer performing a final merge audit on a Soroban (Stellar) Rust smart contract Pull Request. This contract manages real user funds on-chain: deposit, withdraw, queued withdrawal processing, rebalancing across strategies, flash-loan providers, cross-chain endpoints, dynamic fees, governance via voting power, timelock, multisig/guardians, pause circuit-breaker, and upgrade (wasm). Your standard is the highest possible: nothing ships unless it is provably correct, safe, and covered by tests.
 
           LINKED ISSUE DESCRIPTION:
           ${issue}
@@ -210,33 +277,35 @@ jobs:
           PULL REQUEST DIFF:
           ${diff}
 
-          INSTRUCTIONS:
-          If the diff successfully and safely implements the requirements described in the issue, you must output "PASS" on the first line, followed by a short, friendly, and casual approval comment thanking the contributor for their work.
-          If the diff is flawed, misses key requirements, introduces obvious bugs, OR if the contributor asks an architectural/blocking question that requires your input before merging, you must output "FAIL" on the first line, followed by a polite, constructive explanation or answer.
-          IMPORTANT: If the contributor asks a non-blocking question in the description or comments, you can still output "PASS", but you MUST answer their question conversationally within your approval comment!
-          
-          CRITICAL VERIFICATION RULES:
-          1. You MUST strictly evaluate the DIFF against the ISSUE REQUIREMENTS.
-          2. Do NOT blindly trust the user's comments. If the user claims to have fixed something, but the DIFF does not show it, you MUST output "FAIL".
-          3. If the issue explicitly requires specific files (e.g., SECURITY.md) or configurations, and they are missing from the diff, you MUST output "FAIL".
+          SCOPE STATS: ${diffStats} files changed, ${diffLines} diff lines.
 
-          CRITICAL: Act strictly as the human core maintainer. Do NOT mention you are an AI, bot, or automated system. Follow these rules to sound completely natural and human:
-          - You MUST start your response by tagging the contributor: @${author}.
-          - Use a conversational, casual tone like a real dev typing a quick GitHub comment.
-          - Avoid all AI-sounding words (e.g., delve, leverage, robust, seamless, optimize, pivotal, well-structured, crucial, fantastic, certainly, absolutely).
-          - Use natural fillers occasionally (e.g., honestly, actually, just, I think, kinda, looks like, tbh).
-          - Do NOT sound overly polished or robotic. Let it feel like a real dev typed it quickly.
-          - Keep it simple, using everyday language.
-          - NEVER use emojis of any kind. No checkmarks, no tick marks, no symbols whatsoever.
-          - NEVER use bullet checklists to summarise what was done.
-          - NEVER use em dashes. Use a regular comma or just rephrase the sentence.
-          - NEVER use markdown headers like ## or ###.
-          - Write in short prose paragraphs, not structured lists.
-          - Keep the total response under 150 words. Real maintainers write short reviews.`;
+          NON-NEGOTIABLE PASS CRITERIA (all must hold):
+          1. The diff genuinely and completely implements every explicit requirement in the issue. Verify against the diff itself, never trust the PR description or comments.
+          2. Contract math is correct: check for integer overflow/underflow, precision loss, fee calculations, share/asset rounding. Overflow-checks are enabled in release profile, but audit the math anyway.
+          3. Authentication is correct: every state-changing function enforces \`require_auth(admin)\` or the correct caller permission. No function that moves funds or changes control can be callable without auth.
+          4. Storage keys are namespaced correctly (DataKey) — no collisions between users/strategies/providers.
+          5. Edge cases handled: zero balances, re-entrancy into the same env call, partial/queued withdrawals, failed transfers, unknown providers, token transfer trustlines.
+          6. Tests are added/updated for the change and meaningfully exercise the new logic, including negative/error paths. Missing or stub-only tests are an automatic FAIL.
+          7. No scope creep, dead code, TODOs, hacks, panics where errors should be returned, or placeholder logic.
+          8. No security concerns: no unauthenticated admin paths, no unbounded loops over attacker-controlled collections, no unsafe unwraps on tainted data, no exposed secrets in the diff.
+          9. The change does not break existing functionality (review the whole diff, not just added lines).
+
+          FAIL automatically if: any criterion above fails; the PR is very large (more than 20 files or 1500 diff lines) unless clearly justified; you have any blocking architectural/security question; tests are missing for the changed logic.
+
+          After the first line, write the review comment.
+          - If PASS: write a short, friendly, human approval comment that references SPECIFIC code you verified in the diff (function names, storage keys, auth patterns, math you checked). Vary the opening sentence - never start with the same phrase twice. Never say "PASS". Never mention you are an AI or automated.
+          - If FAIL: write a polite, specific, constructive explanation of exactly what is wrong and what must be fixed. Reference the specific code. Be direct about security/correctness issues.
+
+          WRITING STYLE (act as the human core maintainer):
+          - Start your comment by tagging the contributor: @${author}.
+          - Conversational, casual tone like a real dev typing a quick GitHub comment. Use natural fillers occasionally (honestly, actually, just, I think, kinda, looks like, tbh).
+          - Never use emojis, markdown headers, bullet lists, or em dashes.
+          - Keep it under 150 words.
+          - Vary your opening every single time. A good mix of conversational openers is fine, but never repeat the exact same first sentence.`;
 
           async function run() {
             try {
-              console.log('🌐 Calling Anthropic API (model: claude-sonnet-5)...');
+              console.log('🌐 Calling Anthropic API (model: ' + model + ')...');
               const res = await fetch('https://api.anthropic.com/v1/messages', {
                 method: 'POST',
                 headers: {
@@ -245,7 +314,7 @@ jobs:
                   'anthropic-version': '2023-06-01'
                 },
                 body: JSON.stringify({
-                  model: 'claude-sonnet-4-6',
+                  model: model,
                   max_tokens: 1500,
                   messages: [{role: 'user', content: prompt}]
                 })
@@ -253,38 +322,34 @@ jobs:
 
               if (!res.ok) {
                 const errorBody = await res.text();
-                console.error(`❌ AI API failed with status ${res.status}`);
-                console.error(`   Response: ${errorBody}`);
+                console.error('❌ AI API failed with status ' + res.status);
+                console.error('   Response: ' + errorBody);
                 console.log('⚠️ Falling back to non-AI review flow.');
                 process.exit(0);
               }
 
               const data = await res.json();
-              console.log(`✅ API responded successfully (usage: ${data.usage?.input_tokens} in / ${data.usage?.output_tokens} out tokens)`);
+              console.log('✅ API responded successfully (usage: ' + (data.usage?.input_tokens ?? 0) + ' in / ' + (data.usage?.output_tokens ?? 0) + ' out tokens)');
               const responseText = data.content[0].text.trim();
 
               if (responseText.startsWith('PASS')) {
-                console.log("🎉 AI Review Result: PASS");
+                console.log('🎉 AI Review Result: PASS');
                 const approvalMsg = responseText.replace(/^PASS\s*/i, '').trim();
                 if (approvalMsg) {
-                    console.log(`   AI comment: "${approvalMsg.substring(0, 100)}..."`);
-                    fs.writeFileSync('ai_approval.txt', approvalMsg);
+                  console.log('   AI comment: "' + approvalMsg.substring(0, 100) + '..."');
+                  fs.writeFileSync('ai_approval.txt', approvalMsg);
                 }
                 process.exit(0);
               } else {
-                console.log("🚫 AI Review Result: FAIL");
+                console.log('🚫 AI Review Result: FAIL');
                 const feedback = responseText.replace(/^FAIL\s*/i, '').trim();
-                console.log(`   AI feedback: "${feedback.substring(0, 100)}..."`);
-                const comment = `**Review against issue body failed**\n\n${feedback}`;
-
-                fs.writeFileSync('feedback.txt', comment);
-                execSync(`gh pr comment ${prNumber} --body-file feedback.txt`);
-                process.exit(1);
+                console.log('   AI feedback: "' + feedback.substring(0, 100) + '..."');
+                fs.writeFileSync('feedback.txt', '**Review against issue body failed**\n\n' + feedback);
+                process.exit(0);
               }
             } catch (err) {
-              console.error("❌ AI Review encountered an unexpected error:");
-              console.error(`   Error: ${err.message}`);
-              console.error(`   Stack: ${err.stack}`);
+              console.error('❌ AI Review encountered an unexpected error:');
+              console.error('   Error: ' + err.message);
               console.log('⚠️ Falling back to non-AI review flow.');
               process.exit(0);
             }
@@ -294,38 +359,48 @@ jobs:
           EOF
 
           node ai_review.js
+          echo "AI_EXIT=$?" >> "$GITHUB_ENV"
 
-      - name: ✅ Handle Review Success
-        if: steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success'
+          if [ -f ai_approval.txt ]; then
+            echo "AI_RESULT=PASS" >> "$GITHUB_ENV"
+          elif [ -f feedback.txt ]; then
+            echo "AI_RESULT=FAIL" >> "$GITHUB_ENV"
+          else
+            echo "AI_RESULT=SKIP" >> "$GITHUB_ENV"
+          fi
+
+      - name: ❌ Post AI Feedback & Request Changes
+        if: env.AI_RESULT == 'FAIL'
+        run: |
+          gh pr comment $PR_NUMBER --body-file feedback.txt
+          gh pr review $PR_NUMBER --request-changes -b "Automated review found issues. See the feedback above; push fixes and the checks will re-run."
+          exit 1
+
+      - name: 🛡️ Human Confirmation Gate (money/control paths)
+        if: env.AI_RESULT == 'PASS'
+        run: |
+          PR_DIFF=$(gh pr diff $PR_NUMBER)
+          if echo "$PR_DIFF" | grep -qE "upgrade|rebalance|flash_loan|add_strategy|remove_strategy|cast_vote|set_oracle_data|process_queued_withdrawal|set_withdraw_queue_threshold|set_max_staleness|set_max_flash_loan_fee|cross_chain|set_governance|set_timelock|set_guardian|pause|unpause|take_fees"; then
+            echo "⚠️ PR touches money/control paths (upgrade/rebalance/flash-loan/cross-chain/admin). Human confirmation required — NOT auto-merging."
+            echo "HUMAN_CONFIRM=true" >> "$GITHUB_ENV"
+            gh pr comment $PR_NUMBER --body "⚠️ @bbkenny this PR touches critical money/control logic (upgrade / rebalance / flash-loan / cross-chain / admin). It will **NOT** be auto-merged — please review and merge manually once you're satisfied."
+          else
+            echo "✅ No critical money/control paths touched. Auto-merge permitted."
+            echo "HUMAN_CONFIRM=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: ✅ Handle Review Success (Approve & Merge)
+        if: env.AI_RESULT == 'PASS' && env.HUMAN_CONFIRM != 'true' && steps.build_review.outcome == 'success' && steps.lint_review.outcome == 'success'
         run: |
           PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
-          PR_NUMBER=$PR_NUMBER
           OWNER="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
 
-          # Create an array of dynamic responses
-          RESPONSES=(
-            "hey @${{ env.AUTHOR }}, just went through the changes for '$PR_TITLE'. logic looks really solid and the tests passed perfectly. going ahead and approving + merging this into main now, thanks for the contribution!"
-            "Awesome work on '$PR_TITLE' @${{ env.AUTHOR }}. Tests are completely green, so I'm approving this!"
-            "Everything looks perfect for '$PR_TITLE' @${{ env.AUTHOR }}. Thanks for the contribution, approved and merging!"
-            "Solid implementation on '$PR_TITLE' @${{ env.AUTHOR }}. Tests passed, approving and merging now."
-            "Great job here on '$PR_TITLE' @${{ env.AUTHOR }}. Logic is sound and tests are passing. Approved!"
-            "Looks good to me @${{ env.AUTHOR }}! '$PR_TITLE' passed all checks. Merging this in, thanks!"
-            "Love the changes in '$PR_TITLE' @${{ env.AUTHOR }}. Spot on! Approved and merging."
-          )
+          SELECTED_RESPONSE=$(cat ai_approval.txt)
+          echo "🤖 Using AI-generated approval comment."
 
-          if [ -f ai_approval.txt ]; then
-            SELECTED_RESPONSE=$(cat ai_approval.txt)
-            echo "🤖 Using AI-generated approval comment."
-          else
-            SELECTED_RESPONSE=$(shuf -n1 -e "${RESPONSES[@]}")
-            echo "📝 Using random pre-written approval comment (AI review was skipped or unavailable)."
-          fi
-
-          # 1. Approve the PR with the dynamic comment (This looks like it came from bbkenny!)
           gh pr review "$PR_NUMBER" --approve -b "$SELECTED_RESPONSE"
 
-          # 2. Merge the PR when allowed; fall back gracefully when auto-merge is disabled
           allowed=$(gh api repos/"$OWNER"/"$REPO" -q '.allow_auto_merge' 2>/dev/null || echo "false")
           if [ "$allowed" = "true" ]; then
             echo "Auto-merge is allowed; attempting auto-merge for PR #${PR_NUMBER}..."
@@ -344,3 +419,8 @@ jobs:
               gh pr comment "$PR_NUMBER" --body "Review passed and PR approved. Auto-merge is disabled for this repository — please merge manually when ready."
             fi
           fi
+
+      - name: 💬 AI Review Unavailable Notice
+        if: env.AI_RESULT == 'SKIP' && env.SKIP_REVIEW != 'true'
+        run: |
+          echo "AI review skipped (already noticed via comment). PR left for manual review — no auto-merge."
