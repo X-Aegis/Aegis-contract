@@ -72,28 +72,24 @@ jobs:
           ISSUE_NUM=$(echo "$PR_BODY" | grep -oEi "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved) #[0-9]+" | head -n1 | grep -oE "[0-9]+")
 
           if ! gh issue view "$ISSUE_NUM" --json state,title,assignees > /tmp/issue.json 2>/dev/null; then
-            gh pr comment $PR_NUMBER --body "hey @${{ env.AUTHOR }}, i couldn't find the linked issue #$ISSUE_NUM. please double-check the issue number in the PR description."
-            gh pr review $PR_NUMBER --request-changes -b "Linked issue #$ISSUE_NUM not found. Fix the issue reference so we can verify assignment."
+            gh pr review $PR_NUMBER --request-changes -b "hey @${{ env.AUTHOR }}, i couldn't find the linked issue #$ISSUE_NUM. please double-check the issue number in the PR description."
             exit 1
           fi
 
           STATE=$(jq -r .state /tmp/issue.json)
           if [ "$STATE" != "OPEN" ]; then
-            gh pr comment $PR_NUMBER --body "hey @${{ env.AUTHOR }}, the linked issue #$ISSUE_NUM is \`$STATE\`. please reopen it or link an open issue so we can proceed."
-            gh pr review $PR_NUMBER --request-changes -b "Linked issue #$ISSUE_NUM is $STATE, so there's nothing to work against. Link an open issue to continue."
+            gh pr review $PR_NUMBER --request-changes -b "hey @${{ env.AUTHOR }}, the linked issue #$ISSUE_NUM is \`$STATE\`. please reopen it or link an open issue so we can proceed."
             exit 1
           fi
 
           ASSIGNEES=$(jq -r '[.assignees[].login] | join(",")' /tmp/issue.json)
           if [ -z "$ASSIGNEES" ]; then
-            gh pr comment $PR_NUMBER --body "hey @${{ env.AUTHOR }}, issue #$ISSUE_NUM isn't assigned to anyone yet. please get yourself assigned to the issue before submitting work."
-            gh pr review $PR_NUMBER --request-changes -b "Issue #$ISSUE_NUM is unassigned. Get assigned to the issue (or ask a maintainer to assign you) before submitting."
+            gh pr review $PR_NUMBER --request-changes -b "hey @${{ env.AUTHOR }}, issue #$ISSUE_NUM isn't assigned to anyone yet. please get yourself assigned to the issue before submitting work."
             exit 1
           fi
 
           if ! echo ",$ASSIGNEES," | grep -q ",${{ env.AUTHOR }},"; then
-            gh pr comment $PR_NUMBER --body "hey @${{ env.AUTHOR }}, issue #$ISSUE_NUM is assigned to \`$ASSIGNEES\` but not to you. only the assigned contributor can have work merged for this issue."
-            gh pr review $PR_NUMBER --request-changes -b "Issue #$ISSUE_NUM is assigned to $ASSIGNEES, not you. Work must be done by the assignee. Ask a maintainer to reassign if intended."
+            gh pr review $PR_NUMBER --request-changes -b "hey @${{ env.AUTHOR }}, issue #$ISSUE_NUM is assigned to \`$ASSIGNEES\` but not to you. only the assigned contributor can have work merged for this issue."
             exit 1
           fi
 
@@ -106,7 +102,7 @@ jobs:
             RESPONSES=(
               "hey @${{ env.AUTHOR }}, it looks like there are merge conflicts with the \`main\` branch. could you pull the latest changes and resolve them so i can run my tests?"
               "Hi @${{ env.AUTHOR }}! This PR currently has merge conflicts with \`main\`. Please rebase or merge the latest changes so we can proceed with the review."
-              "Looks like some conflicts popped up with the base branch @${{ env.AUTHOR }}! Once you resolve them, the automated checks will kick off again."
+              "Looks like some conflicts popped up with the base branch @${{ env.AUTHOR }}! Once you resolve them, the checks will kick off again."
               "Hey @${{ env.AUTHOR }}, we can't merge this yet because of conflicts with \`main\`. Mind taking a look and fixing them up?"
               "Merge conflicts detected @${{ env.AUTHOR }}! Please sync your branch with \`main\` and resolve the conflicts so we can get this reviewed."
               "HI @${{ env.AUTHOR }}, looks like someone else merged changes that conflict with yours. Please resolve the conflicts and push an update!"
@@ -184,11 +180,11 @@ jobs:
           PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
           RESPONSES=(
             "hey @${{ env.AUTHOR }}, took a look at the PR for '$PR_TITLE'. actually, it looks like the CI checks (tests/build) are failing right now. mind checking the logs and fixing the errors? once it's passing, just push an update and we can get it merged."
-            "Thanks for submitting '$PR_TITLE' @${{ env.AUTHOR }}! Unfortunately, the automated checks failed. Please review the Actions logs to see what went wrong and push a fix."
+            "Thanks for submitting '$PR_TITLE' @${{ env.AUTHOR }}! Unfortunately, the build or tests are failing right now. Please review the Actions logs to see what went wrong and push a fix."
             "Hey @${{ env.AUTHOR }}! The build/tests are currently failing for '$PR_TITLE'. Could you take a look at the workflow logs and patch up the errors?"
             "Looks like there are some failing checks on '$PR_TITLE' @${{ env.AUTHOR }}. Once you get the tests passing, let us know by pushing the fixes!"
             "We're almost there with '$PR_TITLE' @${{ env.AUTHOR }}, but the CI pipeline is red. Check the logs for details and push an update when you have it fixed!"
-            "Hey @${{ env.AUTHOR }}, the automated tests didn't pass for '$PR_TITLE'. Mind taking a look at the errors and fixing them up?"
+            "Hey @${{ env.AUTHOR }}, the tests didn't pass for '$PR_TITLE'. Mind taking a look at the errors and fixing them up?"
           )
           SELECTED=$(shuf -n1 -e "${RESPONSES[@]}")
           gh pr comment $PR_NUMBER --body "$SELECTED"
@@ -221,7 +217,7 @@ jobs:
 
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "⚠️ No ANTHROPIC_API_KEY found — AI review unavailable."
-            gh pr comment $PR_NUMBER --body "Automated AI review is unavailable (ANTHROPIC_API_KEY not configured). Please review this PR manually."
+            gh pr comment $PR_NUMBER --body "Code review couldn't be run right now (API key not configured). Please review this PR manually."
             echo "AI_RESULT=SKIP" >> "$GITHUB_ENV"
             exit 0
           fi
@@ -372,8 +368,7 @@ jobs:
       - name: ❌ Post AI Feedback & Request Changes
         if: env.AI_RESULT == 'FAIL'
         run: |
-          gh pr comment $PR_NUMBER --body-file feedback.txt
-          gh pr review $PR_NUMBER --request-changes -b "Automated review found issues. See the feedback above; push fixes and the checks will re-run."
+          gh pr review $PR_NUMBER --request-changes --body-file feedback.txt
           exit 1
 
       - name: 🛡️ Human Confirmation Gate (money/control paths)
