@@ -129,7 +129,7 @@ jobs:
       - name: 🕓 Already-Reviewed SHA Check (dedupe)
         run: |
           HEAD_SHA=$(gh pr view $PR_NUMBER --json headRefOid -q .headRefOid)
-          LAST_REVIEW_SHA=$(gh pr view $PR_NUMBER --json reviews -q '[.reviews[] | select(.author.login == "bbkenny")] | last | .commit_id' 2>/dev/null || echo "")
+          LAST_REVIEW_SHA=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --jq '[.[] | select(.user.login == "bbkenny")] | last | .commit_id // ""' 2>/dev/null || echo "")
           if [ -n "$LAST_REVIEW_SHA" ] && [ "$LAST_REVIEW_SHA" = "$HEAD_SHA" ]; then
             echo "🕓 Bot already reviewed head SHA $HEAD_SHA. Skipping re-review (no new commits)."
             echo "SKIP_REVIEW=true" >> "$GITHUB_ENV"
