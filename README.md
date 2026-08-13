@@ -17,6 +17,8 @@
 - **Network:** Stellar Testnet
 - **Smart Contract ID:** `CDWW6ZYH4UEOVR2DQEKBL742DFDR6QGVK26UOBNRBJDSXBYK2S6M7VWH`
 - **Explorer:** [Stellar Expert](https://stellar.expert/explorer/testnet/contract/CDWW6ZYH4UEOVR2DQEKBL742DFDR6QGVK26UOBNRBJDSXBYK2S6M7VWH)
+- **Backend API:** [Live on Render](https://aegis-backend-ai.onrender.com) — serves real-time AI risk scores
+- **Frontend DApp:** Live on Vercel — connects to the testnet contract
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Built on Stellar](https://img.shields.io/badge/Built%20on-Stellar%20Soroban-purple)](https://soroban.stellar.org)
@@ -83,17 +85,30 @@ graph TD
 *   Freighter Wallet
 
 ### 2. Local Setup
-(This repo is currently local-only).
 
-**Verify Integrity:**
+**Build the contracts:**
 ```bash
+cd smartcontract
 cargo build --all
 ```
 
-**Setup Smart Contracts:**
+**Run the test suite** (unit tests + Soroban snapshot tests):
 ```bash
 cd smartcontract
-# Smart contract setup instructions go here
+cargo test
+```
+
+**Build a release WASM for deployment:**
+```bash
+cd smartcontract
+make build
+```
+
+**Formatting & linting:**
+```bash
+cd smartcontract
+cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 
