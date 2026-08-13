@@ -1,4 +1,4 @@
-name: Protocol Liaison (PR Reviewer)
+name: Protocol Reviewer
 
 on:
   pull_request_target:

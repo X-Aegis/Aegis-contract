@@ -43,7 +43,7 @@ We follow a strict **Modular Commit** philosophy to ensure history is readable a
 These rules are required for every contribution and are enforced during review.
 
 1.  **Human review required** — all PRs are reviewed by the maintainer before merge. Automated checks only advise; they never approve or merge.
-2.  **No agent/AI branches** — do not submit PRs from `agent/*` branches or purely AI-generated work without your own analysis, testing, and ownership of the change.
+2.  **No agent/AI branches** — use a normal `feature/*` branch and never an `agent/*` branch; do not submit purely AI-generated work without your own analysis, testing, and ownership of the change.
 3.  **Show the work** — include evidence in your PR: `cargo test` passing, and where applicable a screenshot or short demo of the feature in action.
 4.  **Link the issue** — every PR description must use `Closes #<issue>`.
 5.  **Quality over quantity** — pick issues that move the product forward. Difficulty alone is not value; the change must be user-visible or fix a real problem.
