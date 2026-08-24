@@ -46,3 +46,16 @@ Emitted at the end of state-altering operations (like `Rebalance` and `Harvest`)
 **Payload:** (Tuple)
 1. `total_assets_after`: i128 (Total assets in the vault)
 2. `total_shares_after`: i128 (Total shares minted)
+
+---
+
+## Strategy / ProtectionSet
+Emitted when the admin classifies a registered strategy as `Safe` or `Volatile` via `set_strategy_protection`. Indexers use this alongside oracle allocation events to compute `get_protection_status`.
+
+**Topics:**
+- `Strategy`
+- `ProtectionSet`
+
+**Payload:** (Tuple)
+1. `strategy`: Address (The strategy being classified)
+2. `status`: ProtectionStatus (`Safe` or `Volatile`)

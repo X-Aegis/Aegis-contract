@@ -1432,6 +1432,209 @@ fn test_get_voting_power_proportional() {
     assert_eq!(client.get_voting_power(&user2), 4000);
 }
 
+// ── Position Dashboard Tests (SC-36) ─────────────────────────────
+
+#[test]
+fn test_get_user_position_after_deposit() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (client, admin, sac, _tc, _token_id) = setup_vault(&env);
+    let _ = admin;
+
+    let user = Address::generate(&env);
+    sac.mint(&user, &1_000);
+
+    client.deposit(&user, &1_000);
+
+    let position = client.get_user_position(&user);
+    assert_eq!(position.deposited, 1_000);
+    assert_eq!(position.shares, 1_000);
+    assert_eq!(position.pending_withdrawal, 0);
+    assert_eq!(position.accrued_yield, 0);
+}
+
+#[test]
+fn test_get_user_position_reflects_accrued_yield() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (client, admin, sac, _tc, _token_id) = setup_vault(&env);
+    let _ = admin;
+
+    let user = Address::generate(&env);
+    sac.mint(&user, &1_000);
+    client.deposit(&user, &1_000);
+
+    // Simulate the vault earning yield: total_assets grows while shares stay put.
+    client.set_total_assets(&1_500);
+
+    let position = client.get_user_position(&user);
+    assert_eq!(position.deposited, 1_000);
+    assert_eq!(position.shares, 1_000);
+    assert_eq!(position.accrued_yield, 500);
+}
+
+#[test]
+fn test_get_user_position_partial_withdraw_reduces_principal_proportionally() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (client, admin, sac, _tc, _token_id) = setup_vault(&env);
+    let _ = admin;
+
+    let user = Address::generate(&env);
+    sac.mint(&user, &1_000);
+    client.deposit(&user, &1_000);
+
+    // Withdraw half the shares at an unchanged share price.
+    client.withdraw(&user, &500);
+
+    let position = client.get_user_position(&user);
+    assert_eq!(position.shares, 500);
+    assert_eq!(position.deposited, 500);
+    assert_eq!(position.accrued_yield, 0);
+}
+
+#[test]
+fn test_get_user_position_includes_pending_withdrawal() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (client, admin, sac, _tc, _token_id) = setup_vault(&env);
+    let _ = admin;
+
+    let user = Address::generate(&env);
+    sac.mint(&user, &1_000);
+    client.deposit(&user, &1_000);
+
+    client.set_withdraw_queue_threshold(&admin, &100);
+    client.queue_withdraw(&user, &400);
+
+    let position = client.get_user_position(&user);
+    assert_eq!(position.shares, 600);
+    assert_eq!(position.pending_withdrawal, 400);
+    assert_eq!(position.deposited, 600);
+}
+
+#[test]
+fn test_get_user_position_defaults_for_new_user() {
+    let env = Env::default();
+    let (client, _admin, _sac, _tc, _token_id) = setup_vault(&env);
+
+    let user = Address::generate(&env);
+    let position = client.get_user_position(&user);
+    assert_eq!(position.deposited, 0);
+    assert_eq!(position.shares, 0);
+    assert_eq!(position.pending_withdrawal, 0);
+    assert_eq!(position.accrued_yield, 0);
+}
+
+#[test]
+fn test_protection_status_defaults_safe_with_no_allocations() {
+    let env = Env::default();
+    let (client, _admin, _sac, _tc, _token_id) = setup_vault(&env);
+
+    let user = Address::generate(&env);
+    assert_eq!(client.get_protection_status(&user), ProtectionStatus::Safe);
+}
+
+#[test]
+fn test_set_strategy_protection_requires_admin() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (client, admin, _sac, _tc, _token_id) = setup_vault(&env);
+    let strategy = Address::generate(&env);
+    client.add_strategy(&strategy);
+
+    let not_admin = Address::generate(&env);
+    let result =
+        client.try_set_strategy_protection(&not_admin, &strategy, &ProtectionStatus::Safe);
+    assert!(result.is_err());
+
+    // Sanity: admin path succeeds.
+    client.set_strategy_protection(&admin, &strategy, &ProtectionStatus::Safe);
+    assert_eq!(client.get_strategy_protection(&strategy), ProtectionStatus::Safe);
+}
+
+#[test]
+fn test_set_strategy_protection_unlisted_strategy_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (client, admin, _sac, _tc, _token_id) = setup_vault(&env);
+    let strategy = Address::generate(&env);
+
+    let result = client.try_set_strategy_protection(&admin, &strategy, &ProtectionStatus::Safe);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_strategy_protection_defaults_volatile() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (client, admin, _sac, _tc, _token_id) = setup_vault(&env);
+    let strategy = Address::generate(&env);
+    client.add_strategy(&strategy);
+    let _ = admin;
+
+    assert_eq!(
+        client.get_strategy_protection(&strategy),
+        ProtectionStatus::Volatile
+    );
+}
+
+#[test]
+fn test_protection_status_safe_when_majority_allocation_safe() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (client, admin, _sac, _tc, _token_id) = setup_vault(&env);
+
+    let safe_strategy = Address::generate(&env);
+    let volatile_strategy = Address::generate(&env);
+    client.add_strategy(&safe_strategy);
+    client.add_strategy(&volatile_strategy);
+    client.set_strategy_protection(&admin, &safe_strategy, &ProtectionStatus::Safe);
+    client.set_strategy_protection(&admin, &volatile_strategy, &ProtectionStatus::Volatile);
+
+    let mut allocations = Map::new(&env);
+    allocations.set(safe_strategy.clone(), 6000i128);
+    allocations.set(volatile_strategy.clone(), 4000i128);
+    client.set_oracle_data(&client.get_oracle(), &allocations, &env.ledger().timestamp());
+
+    let user = Address::generate(&env);
+    assert_eq!(client.get_protection_status(&user), ProtectionStatus::Safe);
+}
+
+#[test]
+fn test_protection_status_volatile_when_majority_allocation_volatile() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (client, admin, _sac, _tc, _token_id) = setup_vault(&env);
+
+    let safe_strategy = Address::generate(&env);
+    let volatile_strategy = Address::generate(&env);
+    client.add_strategy(&safe_strategy);
+    client.add_strategy(&volatile_strategy);
+    client.set_strategy_protection(&admin, &safe_strategy, &ProtectionStatus::Safe);
+    client.set_strategy_protection(&admin, &volatile_strategy, &ProtectionStatus::Volatile);
+
+    let mut allocations = Map::new(&env);
+    allocations.set(safe_strategy.clone(), 3000i128);
+    allocations.set(volatile_strategy.clone(), 7000i128);
+    client.set_oracle_data(&client.get_oracle(), &allocations, &env.ledger().timestamp());
+
+    let user = Address::generate(&env);
+    assert_eq!(
+        client.get_protection_status(&user),
+        ProtectionStatus::Volatile
+    );
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #15)")]
 fn test_cast_vote_stub() {
