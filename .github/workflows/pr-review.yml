@@ -27,6 +27,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          # Required for pull_request_target: GitHub refuses to check out fork
+          # PR code in the trusted base-repo context unless this is set. Only
+          # fork code is ever built here (never workflow YAML from the PR), and
+          # the Workflow Tampering gate above closes .github/ changes from
+          # non-collaborators before any code execution.
+          allow-unsafe-pr-checkout: true
 
       - name: ❌ Check for Workflow Tampering
         run: |
