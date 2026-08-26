@@ -19,6 +19,7 @@ jobs:
     if: (github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)) && github.actor != 'bbkenny' && !contains(github.actor, 'bot')
     runs-on: ubuntu-latest
     env:
+      GH_REPO: ${{ github.repository }}
       GITHUB_TOKEN: ${{ secrets.MAINTAINER_TOKEN != '' && secrets.MAINTAINER_TOKEN || secrets.GITHUB_TOKEN }}
       PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || github.event.issue.number }}
       AUTHOR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.user.login || github.event.comment.user.login }}
