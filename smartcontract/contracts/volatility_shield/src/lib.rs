@@ -62,6 +62,10 @@ pub enum Error {
     ContractNotPaused = 17,
     NoBalance = 18,
     InsufficientLiquidity = 19,
+    ProposalNotFound = 20,
+    ProposalExecuted = 21,
+    AlreadyApproved = 22,
+    TimelockNotElapsed = 23,
 }
 
 // ─────────────────────────────────────────────
@@ -109,8 +113,60 @@ pub enum DataKey {
     CrossChainRebalanceNonce,
     /// Governance token address for future governance integration.
     GovernanceToken,
+    /// Multisig guardian registry.
+    Guardians,
+    /// Number of guardian approvals required to execute a proposal.
+    Threshold,
+    /// Map of proposal ID → Proposal.
+    Proposals,
+    /// Ordered list of proposal IDs.
+    ProposalIds,
+    /// Monotonically incrementing counter for proposal IDs.
+    NextProposalId,
+    /// Records whether an address has already voted on a proposal.
+    VoteRecord(u64, Address),
+    /// Tally of yes/no votes for a proposal.
+    VoteTally(u64),
+    /// Delay (in seconds) before an approved proposal can execute.
+    TimelockDuration,
     /// Global emergency circuit-breaker state.
     Paused,
+}
+
+// ─────────────────────────────────────────────
+// Governance types
+// ─────────────────────────────────────────────
+
+/// The type of action a governance proposal can execute once approved.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActionType {
+    /// Pause or unpause the vault.
+    SetPaused(bool),
+    /// Change the multisig approval threshold.
+    SetThreshold(u32),
+}
+
+/// A pending governance proposal that requires a threshold of guardian
+/// approvals before its action is executed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub action: ActionType,
+    pub approvals: Vec<Address>,
+    pub executed: bool,
+    pub executed_ledger: u32,
+    pub proposed_at: u64,
+}
+
+/// Vote tally for a governance proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteTally {
+    pub yes_votes: i128,
+    pub no_votes: i128,
 }
 
 // ─────────────────────────────────────────────
@@ -217,6 +273,20 @@ impl VolatilityShield {
             .set(&DataKey::FeePercentage, &fee_percentage);
         env.storage().instance().set(&DataKey::Token, &asset);
         env.storage().instance().set(&DataKey::Paused, &false);
+        // Governance: admin is the initial guardian, threshold of 1 (admin-only
+        // execution until more guardians are added).
+        env.storage()
+            .instance()
+            .set(&DataKey::Guardians, &soroban_sdk::vec![&env, admin.clone()]);
+        env.storage().instance().set(&DataKey::Threshold, &1_u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposals, &Map::<u64, Proposal>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalIds, &Vec::<u64>::new(&env));
+        env.storage().instance().set(&DataKey::NextProposalId, &1_u64);
+        env.storage().instance().set(&DataKey::TimelockDuration, &0_u64);
     }
 
     // Emergency circuit breaker
@@ -1598,7 +1668,7 @@ impl VolatilityShield {
         Ok(next_nonce)
     }
 
-    // ── Governance Token (SC-29) ──────────────
+    // ── Governance (SC-29) ────────────────────
 
     /// Set the governance token address. Admin-only.
     pub fn set_governance_token(env: Env, caller: Address, token: Address) {
@@ -1632,10 +1702,355 @@ impl VolatilityShield {
         (user_shares * total_assets) / total_shares
     }
 
-    /// Cast a vote. Currently unimplemented.
-    pub fn cast_vote(env: Env, voter: Address, _proposal_id: u32, _support: bool) {
+    /// Add a guardian to the multisig. Admin-only.
+    pub fn add_guardian(env: Env, caller: Address, guardian: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        let mut guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&env));
+        if guardians.contains(guardian.clone()) {
+            return Ok(());
+        }
+        guardians.push_back(guardian.clone());
+        env.storage().instance().set(&DataKey::Guardians, &guardians);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Guardian"), soroban_sdk::Symbol::new(&env, "Added")),
+            guardian,
+        );
+        Ok(())
+    }
+
+    /// Remove a guardian from the multisig. Admin-only.
+    pub fn remove_guardian(env: Env, caller: Address, guardian: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        let mut guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&env));
+        let index = guardians
+            .first_index_of(guardian.clone())
+            .ok_or(Error::Unauthorized)?;
+        guardians.remove(index);
+        env.storage().instance().set(&DataKey::Guardians, &guardians);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Guardian"), soroban_sdk::Symbol::new(&env, "Removed")),
+            guardian,
+        );
+        Ok(())
+    }
+
+    /// Set the number of guardian approvals required to execute a proposal.
+    /// Admin-only. Must be between 1 and the number of guardians.
+    pub fn set_threshold(env: Env, caller: Address, threshold: u32) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        let guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&env));
+        if threshold == 0 || threshold > guardians.len() {
+            return Err(Error::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Threshold, &threshold);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Threshold"), soroban_sdk::Symbol::new(&env, "Set")),
+            threshold,
+        );
+        Ok(())
+    }
+
+    /// Return the current guardian registry.
+    pub fn get_guardians(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Return the current approval threshold.
+    pub fn get_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(1)
+    }
+
+    /// Propose a governance action. Only guardians can propose.
+    ///
+    /// When the threshold is 1 the action executes immediately (subject to the
+    /// timelock); otherwise it stays pending until enough guardians approve.
+    pub fn propose_action(env: Env, proposer: Address, action: ActionType) -> Result<u64, Error> {
+        proposer.require_auth();
+
+        let guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .ok_or(Error::NotInitialized)?;
+        if !guardians.contains(proposer.clone()) {
+            return Err(Error::Unauthorized);
+        }
+
+        let id = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextProposalId, &(id + 1));
+
+        let proposed_at = env.ledger().timestamp();
+        let mut proposal = Proposal {
+            id,
+            proposer: proposer.clone(),
+            action: action.clone(),
+            approvals: soroban_sdk::vec![&env, proposer.clone()],
+            executed: false,
+            executed_ledger: 0,
+            proposed_at,
+        };
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Proposal"), soroban_sdk::Symbol::new(&env, "Created")),
+            id,
+        );
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Timelock"), soroban_sdk::Symbol::new(&env, "Started")),
+            (id, proposed_at),
+        );
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(1);
+        if threshold <= 1 {
+            match Self::execute_action(&env, &action, proposed_at) {
+                Ok(()) => {
+                    proposal.executed = true;
+                    proposal.executed_ledger = env.ledger().sequence();
+                }
+                Err(Error::TimelockNotElapsed) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        let mut proposals: Map<u64, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env));
+        proposals.set(id, proposal);
+        env.storage().instance().set(&DataKey::Proposals, &proposals);
+        let mut proposal_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalIds)
+            .unwrap_or(Vec::new(&env));
+        proposal_ids.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalIds, &proposal_ids);
+
+        Ok(id)
+    }
+
+    /// Approve a pending proposal. Only guardians can approve, and only once.
+    /// When the approval threshold is reached the action is executed.
+    pub fn approve_action(env: Env, guardian: Address, proposal_id: u64) -> Result<(), Error> {
+        guardian.require_auth();
+
+        let guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .ok_or(Error::NotInitialized)?;
+        if !guardians.contains(guardian.clone()) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut proposals: Map<u64, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .ok_or(Error::NotInitialized)?;
+        let mut proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(Error::ProposalExecuted);
+        }
+        if proposal.approvals.contains(guardian.clone()) {
+            return Err(Error::AlreadyApproved);
+        }
+
+        proposal.approvals.push_back(guardian.clone());
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Proposal"), soroban_sdk::Symbol::new(&env, "Approved")),
+            (proposal_id, guardian.clone()),
+        );
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(1);
+        if proposal.approvals.len() >= threshold {
+            Self::execute_action(&env, &proposal.action, proposal.proposed_at)?;
+            proposal.executed = true;
+            proposal.executed_ledger = env.ledger().sequence();
+        }
+
+        proposals.set(proposal_id, proposal);
+        env.storage().instance().set(&DataKey::Proposals, &proposals);
+
+        Ok(())
+    }
+
+    /// Cast a vote on a proposal, weighted by the voter's voting power.
+    /// Each address may vote only once per proposal.
+    pub fn cast_vote(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        support: bool,
+    ) -> Result<(), Error> {
         voter.require_auth();
-        panic_with_error!(&env, Error::NotImplemented);
+
+        let proposals: Map<u64, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .ok_or(Error::NotInitialized)?;
+        let proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+        if proposal.executed {
+            return Err(Error::ProposalExecuted);
+        }
+
+        let vote_key = DataKey::VoteRecord(proposal_id, voter.clone());
+        if env.storage().instance().has(&vote_key) {
+            return Err(Error::AlreadyApproved);
+        }
+        env.storage().instance().set(&vote_key, &true);
+
+        let voting_power = Self::get_voting_power(env.clone(), voter.clone());
+        let tally_key = DataKey::VoteTally(proposal_id);
+        let mut tally: VoteTally = env
+            .storage()
+            .instance()
+            .get(&tally_key)
+            .unwrap_or(VoteTally {
+                yes_votes: 0,
+                no_votes: 0,
+            });
+
+        if support {
+            tally.yes_votes = tally.yes_votes.checked_add(voting_power).unwrap_or(i128::MAX);
+        } else {
+            tally.no_votes = tally.no_votes.checked_add(voting_power).unwrap_or(i128::MAX);
+        }
+        env.storage().instance().set(&tally_key, &tally);
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Vote"), soroban_sdk::Symbol::new(&env, "Cast")),
+            (proposal_id, support, voting_power),
+        );
+
+        Ok(())
+    }
+
+    /// Get the current yes/no tally for a proposal.
+    pub fn get_vote_tally(env: Env, proposal_id: u64) -> VoteTally {
+        env.storage()
+            .instance()
+            .get(&DataKey::VoteTally(proposal_id))
+            .unwrap_or(VoteTally {
+                yes_votes: 0,
+                no_votes: 0,
+            })
+    }
+
+    /// Get a proposal by ID.
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Option<Proposal> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env))
+            .get(proposal_id)
+    }
+
+    /// Set the timelock duration (in seconds) that must elapse before an
+    /// approved proposal can execute. Admin-only.
+    pub fn set_timelock_duration(env: Env, caller: Address, duration: u64) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::TimelockDuration, &duration);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Timelock"), soroban_sdk::Symbol::new(&env, "DurationSet")),
+            duration,
+        );
+        Ok(())
+    }
+
+    fn execute_action(env: &Env, action: &ActionType, proposed_at: u64) -> Result<(), Error> {
+        Self::assert_timelock_elapsed(env, proposed_at)?;
+        match action {
+            ActionType::SetPaused(state) => {
+                env.storage().instance().set(&DataKey::Paused, state);
+                env.events().publish(
+                    (
+                        soroban_sdk::Symbol::new(env, "VaultPaused"),
+                        soroban_sdk::Symbol::new(env, "Governance"),
+                    ),
+                    state,
+                );
+            }
+            ActionType::SetThreshold(threshold) => {
+                env.storage().instance().set(&DataKey::Threshold, threshold);
+            }
+        }
+        env.events().publish(
+            (soroban_sdk::Symbol::new(env, "Proposal"), soroban_sdk::Symbol::new(env, "Executed")),
+            (),
+        );
+        env.events().publish(
+            (soroban_sdk::Symbol::new(env, "Timelock"), soroban_sdk::Symbol::new(env, "Executed")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn assert_timelock_elapsed(env: &Env, proposed_at: u64) -> Result<(), Error> {
+        let timelock_duration: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TimelockDuration)
+            .unwrap_or(0);
+        if timelock_duration == 0 {
+            return Ok(());
+        }
+        let now = env.ledger().timestamp();
+        let elapsed = now.saturating_sub(proposed_at);
+        if elapsed < timelock_duration {
+            return Err(Error::TimelockNotElapsed);
+        }
+        Ok(())
     }
 
     // ── Contract Upgrade ──────────────────────
