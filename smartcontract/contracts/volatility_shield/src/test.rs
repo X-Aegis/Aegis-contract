@@ -1406,7 +1406,7 @@ fn test_upgrade() {
     client.set_total_assets(&5000);
 
     // Provide a valid WASM module to satisfy Soroban validation
-    let wasm = soroban_sdk::Bytes::from_slice(&env, include_bytes!("../test_snapshots/dummy.wasm"));
+    let wasm = soroban_sdk::Bytes::from_slice(&env, include_bytes!("../test_fixtures/dummy.wasm"));
     let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
 
     client.upgrade(&admin, &new_wasm_hash);
@@ -2219,4 +2219,129 @@ fn test_emergency_withdraw_rounding_conserves_all_assets() {
     assert_eq!(client.total_shares(), 0);
     assert_eq!(client.total_assets(), 0);
     assert_eq!(tc.balance(&contract_id), 0);
+}
+
+// Caps tests (deposit per-user + global, withdrawal per-tx)
+
+#[test]
+fn test_deposit_caps_admin_gated_and_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let stranger = Address::generate(&env);
+
+    // Non-admin cannot set caps
+    assert_eq!(
+        client.try_set_deposit_cap(&stranger, &100i128, &500i128),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Admin sets caps and they read back
+    client.set_deposit_cap(&admin, &100i128, &500i128);
+    assert_eq!(client.get_deposit_caps(), (100i128, 500i128));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_deposit_per_user_cap_blocks_second_deposit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_deposit_cap(&admin, &100i128, &0i128); // per-user cap only
+
+    // First deposit reaches exactly the per-user cap (1:1 share price)
+    let user = Address::generate(&env);
+    sac.mint(&user, &100i128);
+    client.deposit(&user, &100i128);
+
+    // A second deposit would exceed the per-user cap → CapExceeded
+    sac.mint(&user, &10i128);
+    client.deposit(&user, &10i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_global_deposit_cap_blocks_vault_total() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_deposit_cap(&admin, &0i128, &300i128); // global cap only
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    sac.mint(&user1, &250i128);
+    client.deposit(&user1, &250i128);
+
+    // This deposit would push total assets past the global cap → CapExceeded
+    sac.mint(&user2, &100i128);
+    client.deposit(&user2, &100i128);
+}
+
+#[test]
+fn test_global_deposit_cap_allows_within_headroom() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_deposit_cap(&admin, &0i128, &300i128);
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    sac.mint(&user1, &250i128);
+    client.deposit(&user1, &250i128);
+
+    // Within the remaining headroom still works
+    sac.mint(&user2, &50i128);
+    client.deposit(&user2, &50i128);
+    assert_eq!(client.total_assets(), 300);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_withdraw_cap_per_transaction() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_withdraw_cap(&admin, &150i128);
+    assert_eq!(client.get_withdraw_cap(), 150);
+
+    let user = Address::generate(&env);
+    sac.mint(&user, &400i128);
+    client.deposit(&user, &400i128);
+
+    // Withdrawing more than the per-tx cap → CapExceeded
+    client.withdraw(&user, &200i128);
+}
+
+// Slippage protection test
+
+#[test]
+fn test_rebalance_slippage_cap_setter_admin_gated() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let stranger = Address::generate(&env);
+
+    // Non-admin cannot set the slippage tolerance
+    assert_eq!(
+        client.try_set_max_slippage_bps(&stranger, &100u32),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Values above 10_000 BPS are invalid
+    assert_eq!(
+        client.try_set_max_slippage_bps(&admin, &20_000u32),
+        Err(Ok(Error::FeeTooHigh))
+    );
+
+    // Admin sets a valid tolerance
+    client.set_max_slippage_bps(&admin, &100u32);
+    assert_eq!(client.get_max_slippage_bps(), 100);
 }

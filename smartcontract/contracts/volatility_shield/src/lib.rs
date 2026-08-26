@@ -66,6 +66,8 @@ pub enum Error {
     ProposalExecuted = 21,
     AlreadyApproved = 22,
     TimelockNotElapsed = 23,
+    CapExceeded = 24,
+    SlippageExceeded = 25,
 }
 
 // ─────────────────────────────────────────────
@@ -129,6 +131,15 @@ pub enum DataKey {
     VoteTally(u64),
     /// Delay (in seconds) before an approved proposal can execute.
     TimelockDuration,
+    /// Maximum shares a single user may hold, enforced at deposit.
+    MaxDepositPerUser,
+    /// Maximum total assets the vault accepts.
+    MaxTotalAssets,
+    /// Maximum shares withdrawable in a single transaction.
+    MaxWithdrawPerTx,
+    /// Maximum allowed deviation between expected and actual strategy
+    /// balance after a rebalance, in basis points.
+    MaxSlippageBps,
     /// Global emergency circuit-breaker state.
     Paused,
 }
@@ -416,6 +427,59 @@ impl VolatilityShield {
         }
     }
 
+    /// Verifies each strategy's post-rebalance balance sits within
+    /// `max_slippage_bps` of its target allocation. Reverts the whole
+    /// rebalance via `SlippageExceeded` on any violation.
+    fn verify_rebalance_slippage(
+        env: &Env,
+        allocations: &Map<Address, i128>,
+        initial_balances: &Map<Address, i128>,
+        total_assets: i128,
+        max_slippage_bps: u32,
+    ) {
+        for (strategy_addr, target_allocation) in allocations.iter() {
+            let Some(initial_balance) = initial_balances.get(strategy_addr.clone()) else {
+                continue;
+            };
+            if initial_balance == 0 {
+                continue;
+            }
+
+            let strategy = StrategyClient::new(env, strategy_addr.clone());
+            let final_balance = strategy.balance();
+
+            let expected_balance = total_assets
+                .checked_mul(target_allocation)
+                .unwrap()
+                .checked_div(10_000)
+                .unwrap_or(0);
+
+            if expected_balance == 0 {
+                continue;
+            }
+
+            let slippage_abs = if final_balance > expected_balance {
+                final_balance - expected_balance
+            } else {
+                expected_balance - final_balance
+            };
+
+            let slippage_bps = slippage_abs
+                .checked_mul(10_000)
+                .unwrap()
+                .checked_div(expected_balance)
+                .unwrap_or(0);
+
+            if slippage_bps > max_slippage_bps as i128 {
+                env.events().publish(
+                    (soroban_sdk::Symbol::new(env, "Slippage"), soroban_sdk::Symbol::new(env, "Exceeded")),
+                    (strategy_addr.clone(), expected_balance, final_balance, slippage_bps),
+                );
+                panic_with_error!(env, Error::SlippageExceeded);
+            }
+        }
+    }
+
     // Deposit
     /// Deposits assets into the vault, minting shares for the depositor.
     ///
@@ -445,13 +509,46 @@ impl VolatilityShield {
 
         let balance_key = DataKey::Balance(from.clone());
         let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+
+        // --- Deposit caps validation ---
+        let max_per_user: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxDepositPerUser)
+            .unwrap_or(0);
+        if max_per_user > 0 {
+            let new_balance = current_balance.checked_add(shares_to_mint).unwrap();
+            if new_balance > max_per_user {
+                env.events().publish(
+                    (soroban_sdk::Symbol::new(&env, "Cap"), soroban_sdk::Symbol::new(&env, "Breached")),
+                    (from.clone(), amount),
+                );
+                panic_with_error!(&env, Error::CapExceeded);
+            }
+        }
+
+        let max_total_assets: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxTotalAssets)
+            .unwrap_or(0);
+        if max_total_assets > 0 && total_assets.checked_add(amount).unwrap() > max_total_assets {
+            env.events().publish(
+                (soroban_sdk::Symbol::new(&env, "Cap"), soroban_sdk::Symbol::new(&env, "Breached")),
+                (from.clone(), amount),
+            );
+            panic_with_error!(&env, Error::CapExceeded);
+        }
+        // -------------------------------
+
         env.storage().persistent().set(
             &balance_key,
             &(current_balance.checked_add(shares_to_mint).unwrap()),
         );
 
-        let total_shares = Self::total_shares(&env);
-        let total_assets = Self::total_assets(&env);
         let new_total_shares = total_shares.checked_add(shares_to_mint).unwrap();
         let new_total_assets = total_assets.checked_add(amount).unwrap();
         Self::set_total_shares(env.clone(), new_total_shares);
@@ -489,6 +586,21 @@ impl VolatilityShield {
         if current_balance < shares {
             panic!("insufficient shares for withdrawal");
         }
+
+        // --- Per-transaction withdrawal cap ---
+        let max_withdraw_per_tx: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxWithdrawPerTx)
+            .unwrap_or(0);
+        if max_withdraw_per_tx > 0 && shares > max_withdraw_per_tx {
+            env.events().publish(
+                (soroban_sdk::Symbol::new(&env, "Cap"), soroban_sdk::Symbol::new(&env, "Breached")),
+                (from.clone(), shares),
+            );
+            panic_with_error!(&env, Error::CapExceeded);
+        }
+        // -------------------------------
 
         let assets_to_withdraw = Self::convert_to_assets(env.clone(), shares);
         let (net_assets, fee) = Self::take_fees(&env, assets_to_withdraw);
@@ -849,6 +961,22 @@ impl VolatilityShield {
         let vault = env.current_contract_address();
         let total_assets = Self::total_assets(&env);
 
+        let max_slippage_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxSlippageBps)
+            .unwrap_or(0);
+
+        // Capture pre-rebalance balances so post-trade deviation can be
+        // verified against the slippage tolerance.
+        let mut initial_balances: Map<Address, i128> = Map::new(&env);
+        for (strategy_addr, _alloc_bps) in allocations.iter() {
+            initial_balances.set(
+                strategy_addr.clone(),
+                StrategyClient::new(&env, strategy_addr.clone()).balance(),
+            );
+        }
+
         for (strategy_addr, alloc_bps) in allocations.iter() {
             let target_allocation = (total_assets * alloc_bps) / 10000;
             let strategy = StrategyClient::new(&env, strategy_addr.clone());
@@ -865,6 +993,15 @@ impl VolatilityShield {
             }
         }
         
+                // --- Slippage verification ---
+        // After moving funds, each strategy's actual balance must be within
+        // the configured tolerance of its target allocation, otherwise the
+        // whole rebalance is reverted (Soroban transactions are atomic).
+        if max_slippage_bps > 0 {
+            Self::verify_rebalance_slippage(&env, &allocations, &initial_balances, total_assets, max_slippage_bps);
+        }
+        // -------------------------------
+
         let final_assets = Self::total_assets(&env);
         let final_shares = Self::total_shares(&env);
         env.events().publish((soroban_sdk::Symbol::new(&env, "Rebalance"),), allocations);
@@ -2006,6 +2143,78 @@ impl VolatilityShield {
             duration,
         );
         Ok(())
+    }
+
+    /// Set deposit caps: per-user share limit and global asset limit.
+    /// Admin-only. Zero disables a cap.
+    pub fn set_deposit_cap(env: Env, caller: Address, per_user: i128, global: i128) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        if per_user < 0 || global < 0 {
+            return Err(Error::NegativeAmount);
+        }
+        env.storage().instance().set(&DataKey::MaxDepositPerUser, &per_user);
+        env.storage().instance().set(&DataKey::MaxTotalAssets, &global);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Caps"), soroban_sdk::Symbol::new(&env, "Deposit")),
+            (per_user, global),
+        );
+        Ok(())
+    }
+
+    /// Set the per-transaction withdrawal cap. Admin-only. Zero disables it.
+    pub fn set_withdraw_cap(env: Env, caller: Address, per_tx: i128) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        if per_tx < 0 {
+            return Err(Error::NegativeAmount);
+        }
+        env.storage().instance().set(&DataKey::MaxWithdrawPerTx, &per_tx);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Caps"), soroban_sdk::Symbol::new(&env, "Withdraw")),
+            per_tx,
+        );
+        Ok(())
+    }
+
+    /// Read the configured deposit caps (per-user, global). Zero = disabled.
+    pub fn get_deposit_caps(env: Env) -> (i128, i128) {
+        (
+            env.storage().instance().get(&DataKey::MaxDepositPerUser).unwrap_or(0),
+            env.storage().instance().get(&DataKey::MaxTotalAssets).unwrap_or(0),
+        )
+    }
+
+    /// Read the per-transaction withdrawal cap. Zero = disabled.
+    pub fn get_withdraw_cap(env: Env) -> i128 {
+        env.storage().instance().get(&DataKey::MaxWithdrawPerTx).unwrap_or(0)
+    }
+
+    /// Set the maximum allowed deviation between expected and actual
+    /// strategy balances after a rebalance, in basis points. Admin-only.
+    pub fn set_max_slippage_bps(env: Env, caller: Address, bps: u32) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        if bps > 10_000 {
+            return Err(Error::FeeTooHigh);
+        }
+        env.storage().instance().set(&DataKey::MaxSlippageBps, &bps);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Slippage"), soroban_sdk::Symbol::new(&env, "CapSet")),
+            bps,
+        );
+        Ok(())
+    }
+
+    /// Read the rebalance slippage tolerance in basis points.
+    pub fn get_max_slippage_bps(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::MaxSlippageBps).unwrap_or(0)
     }
 
     fn execute_action(env: &Env, action: &ActionType, proposed_at: u64) -> Result<(), Error> {
