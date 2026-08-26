@@ -75,6 +75,9 @@ pub enum DataKey {
     Admin,
     Asset,
     Oracle,
+    /// Address of the price oracle that feeds the current asset price into
+    /// share-price calculations (SC-34).
+    SharePriceOracle,
     TotalAssets,
     TotalShares,
     Strategies,
@@ -192,6 +195,12 @@ pub struct VolatilityShield;
 
 #[contractimpl]
 impl VolatilityShield {
+    /// Scale applied to share-price oracle readings (1e7, i.e. 1.0000000).
+    const SHARE_PRICE_SCALE: i128 = 10_000_000;
+    /// Maximum age of a share-price oracle reading before it is considered
+    /// stale (24 hours in seconds).
+    const SHARE_PRICE_MAX_STALENESS_SECONDS: u64 = 24 * 60 * 60;
+
     // ── Initialization ────────────────────────
     /// Must be called once. Stores roles and configuration.
     pub fn init(
@@ -732,6 +741,67 @@ impl VolatilityShield {
         if total_bps != 10000 {
             panic!("allocation percentages must sum to 10000 BPS");
         }
+    }
+
+    // ── Share Price Oracle (SC-34) ─────────────
+    /// Updates the address of the share-price oracle. Admin-only.
+    /// Emits a `SharePriceOracleUpdated` event.
+    pub fn set_share_price_oracle(env: Env, caller: Address, oracle: Address) {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            panic!("Unauthorized");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::SharePriceOracle, &oracle);
+        env.events().publish(
+            (
+                soroban_sdk::Symbol::new(&env, "SharePriceOracle"),
+                soroban_sdk::Symbol::new(&env, "Updated"),
+            ),
+            oracle,
+        );
+    }
+
+    /// Returns the address of the configured share-price oracle, if any.
+    pub fn get_share_price_oracle(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::SharePriceOracle)
+    }
+
+    /// Fetches the current asset price from the share-price oracle.
+    ///
+    /// Reverts if the oracle's latest reading is stale beyond
+    /// `SHARE_PRICE_MAX_STALENESS_SECONDS` (24 hours).
+    fn fetch_share_price(env: &Env, oracle: &Address) -> i128 {
+        let current_time = env.ledger().timestamp();
+        let last_update: u64 = env.invoke_contract(
+            oracle,
+            &soroban_sdk::Symbol::new(env, "last_timestamp"),
+            soroban_sdk::vec![env],
+        );
+
+        if current_time > last_update
+            && current_time - last_update > Self::SHARE_PRICE_MAX_STALENESS_SECONDS
+        {
+            env.events().publish(
+                (
+                    soroban_sdk::Symbol::new(env, "SharePriceOracle"),
+                    soroban_sdk::Symbol::new(env, "Stale"),
+                ),
+                (last_update, current_time),
+            );
+            panic!("Stale share price oracle");
+        }
+
+        let price: i128 = env.invoke_contract(
+            oracle,
+            &soroban_sdk::Symbol::new(env, "last_price"),
+            soroban_sdk::vec![env],
+        );
+        if price <= 0 {
+            panic!("invalid share price");
+        }
+        price
     }
 
     // ── Rebalance ─────────────────────────────
@@ -1386,6 +1456,10 @@ impl VolatilityShield {
     }
 
     /// Converts an amount of shares to the equivalent amount of underlying assets, rounding down.
+    ///
+    /// When a share-price oracle is configured, the redemption is priced at the
+    /// oracle's current asset price (scaled by `SHARE_PRICE_SCALE`), reverting if
+    /// the oracle reading is stale.
     pub fn convert_to_assets(env: Env, shares: i128) -> i128 {
         if shares < 0 {
             panic!("negative amount");
@@ -1395,11 +1469,23 @@ impl VolatilityShield {
         if total_shares == 0 {
             return shares;
         }
-        shares
+        let base_assets = shares
             .checked_mul(total_assets)
             .unwrap()
             .checked_div(total_shares)
-            .unwrap()
+            .unwrap();
+
+        match Self::get_share_price_oracle(&env) {
+            Some(oracle) => {
+                let price = Self::fetch_share_price(&env, &oracle);
+                base_assets
+                    .checked_mul(price)
+                    .unwrap()
+                    .checked_div(Self::SHARE_PRICE_SCALE)
+                    .unwrap()
+            }
+            None => base_assets,
+        }
     }
 
     /// Internally updates the total assets storage.
