@@ -23,6 +23,39 @@ impl RejectingToken {
     }
 }
 
+#[soroban_sdk::contract]
+struct MockPriceOracle;
+
+#[soroban_sdk::contractimpl]
+impl MockPriceOracle {
+    pub fn set_price(env: Env, price: i128) {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "price"), &price);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "ts"), &env.ledger().timestamp());
+    }
+
+    pub fn set_timestamp(env: Env, ts: u64) {
+        env.storage().instance().set(&Symbol::new(&env, "ts"), &ts);
+    }
+
+    pub fn last_price(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "price"))
+            .unwrap_or(10_000_000)
+    }
+
+    pub fn last_timestamp(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "ts"))
+            .unwrap_or(0)
+    }
+}
+
 fn create_token_contract<'a>(
     env: &Env,
     admin: &Address,
@@ -2219,6 +2252,126 @@ fn test_emergency_withdraw_rounding_conserves_all_assets() {
     assert_eq!(client.total_shares(), 0);
     assert_eq!(client.total_assets(), 0);
     assert_eq!(tc.balance(&contract_id), 0);
+}
+
+// ── Share Price Oracle (SC-34) tests ─────────────────────────────────────
+
+#[test]
+fn test_share_price_oracle_update() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // No share-price oracle is configured by default.
+    assert_eq!(client.get_share_price_oracle(), None);
+
+    let price_oracle = Address::generate(&env);
+    client.set_share_price_oracle(&admin, &price_oracle);
+
+    // A SharePriceOracleUpdated event must be emitted.
+    assert_eq!(
+        env.events().all(),
+        soroban_sdk::vec![
+            &env,
+            (
+                contract_id,
+                (
+                    Symbol::new(&env, "SharePriceOracle"),
+                    Symbol::new(&env, "Updated")
+                )
+                    .into_val(&env),
+                price_oracle.clone().into_val(&env),
+            ),
+        ]
+    );
+
+    assert_eq!(
+        client.get_share_price_oracle(),
+        Some(price_oracle.clone())
+    );
+
+    // Non-admin updates must be rejected.
+    let attacker = Address::generate(&env);
+    let res = client.try_set_share_price_oracle(&attacker, &price_oracle);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_convert_to_assets_uses_share_price_oracle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // Deploy a mock price oracle reporting price = 2.0 (scale 1e7).
+    let price_oracle_id = env.register(MockPriceOracle, ());
+    let price_oracle = MockPriceOracleClient::new(&env, &price_oracle_id);
+    price_oracle.set_price(&20_000_000i128);
+
+    client.set_total_assets(&100);
+    client.set_total_shares(&100);
+
+    // Without a configured oracle the conversion is the naive 1:1.
+    assert_eq!(client.convert_to_assets(&50), 50);
+
+    // With a fresh oracle at 2.0 the conversion is scaled by the price.
+    client.set_share_price_oracle(&admin, &price_oracle_id);
+    assert_eq!(client.convert_to_assets(&50), 100);
+}
+
+#[test]
+#[should_panic(expected = "Stale share price oracle")]
+fn test_process_queued_withdrawal_stale_oracle_reverted() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    let price_oracle_id = env.register(MockPriceOracle, ());
+    let price_oracle = MockPriceOracleClient::new(&env, &price_oracle_id);
+    price_oracle.set_price(&10_000_000i128);
+
+    client.set_share_price_oracle(&admin, &price_oracle_id);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+    client.set_withdraw_queue_threshold(&admin, &500);
+
+    let id = client.queue_withdraw(&admin, &600);
+
+    // Advance time so the oracle's last update is > 24h in the past.
+    price_oracle.set_timestamp(&0);
+    env.ledger().with_mut(|li| {
+        li.timestamp = 86_401;
+    });
+
+    client.process_queued_withdrawal(&admin, &id);
 }
 
 // Caps tests (deposit per-user + global, withdrawal per-tx)
