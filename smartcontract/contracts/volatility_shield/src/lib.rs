@@ -58,6 +58,10 @@ pub enum Error {
     WithdrawalNotFound = 13,
     WithdrawalAlreadyProcessed = 14,
     NotImplemented = 15,
+    ContractPaused = 16,
+    ContractNotPaused = 17,
+    NoBalance = 18,
+    InsufficientLiquidity = 19,
 }
 
 // ─────────────────────────────────────────────
@@ -105,6 +109,8 @@ pub enum DataKey {
     CrossChainRebalanceNonce,
     /// Governance token address for future governance integration.
     GovernanceToken,
+    /// Global emergency circuit-breaker state.
+    Paused,
 }
 
 // ─────────────────────────────────────────────
@@ -210,9 +216,137 @@ impl VolatilityShield {
             .instance()
             .set(&DataKey::FeePercentage, &fee_percentage);
         env.storage().instance().set(&DataKey::Token, &asset);
+        env.storage().instance().set(&DataKey::Paused, &false);
     }
 
-    // ── Deposit ───────────────────────────────
+    // Emergency circuit breaker
+    /// Returns whether emergency mode is active.
+    ///
+    /// Missing state defaults to `false` so contracts deployed before this
+    /// storage key was introduced remain operable after an upgrade.
+    pub fn paused(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    /// Activates emergency mode. Admin-only.
+    pub fn emergency_pause(env: Env) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+        if Self::paused(&env) {
+            panic_with_error!(&env, Error::ContractPaused);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "VaultPaused"), admin),
+            env.ledger().timestamp(),
+        );
+    }
+
+    /// Deactivates emergency mode and restores normal operations. Admin-only.
+    pub fn emergency_unpause(env: Env) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+        if !Self::paused(&env) {
+            panic_with_error!(&env, Error::ContractNotPaused);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "VaultUnpaused"), admin),
+            env.ledger().timestamp(),
+        );
+    }
+
+    /// Redeems all of a user's economic shares while emergency mode is active.
+    ///
+    /// Both freely-held shares and unprocessed queued withdrawals are redeemed
+    /// at the current proportional share price. No withdrawal fee is charged.
+    /// Queued entries are marked processed atomically to prevent later payout.
+    pub fn emergency_withdraw(env: Env, from: Address) -> i128 {
+        from.require_auth();
+        Self::require_paused(&env);
+
+        let balance_key = DataKey::Balance(from.clone());
+        let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+        let mut pending_withdrawals: Map<u32, PendingWithdrawal> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingWithdrawals)
+            .unwrap_or_else(|| Map::new(&env));
+        let pending_ids = pending_withdrawals.keys();
+        let mut queued_shares = 0i128;
+
+        for withdrawal_id in pending_ids.iter() {
+            let mut pending = pending_withdrawals
+                .get(withdrawal_id)
+                .expect("pending withdrawal key must exist");
+            if pending.from == from && !pending.processed {
+                queued_shares = queued_shares.checked_add(pending.shares).unwrap();
+                pending.processed = true;
+                pending_withdrawals.set(withdrawal_id, pending);
+            }
+        }
+
+        let shares_to_redeem = current_balance.checked_add(queued_shares).unwrap();
+        if shares_to_redeem <= 0 {
+            panic_with_error!(&env, Error::NoBalance);
+        }
+
+        let assets_to_withdraw = Self::convert_to_assets(env.clone(), shares_to_redeem);
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+        let new_total_shares = total_shares.checked_sub(shares_to_redeem).unwrap();
+        let new_total_assets = total_assets.checked_sub(assets_to_withdraw).unwrap();
+
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .expect("Token not initialized");
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract_addr = env.current_contract_address();
+        if token_client.balance(&contract_addr) < assets_to_withdraw {
+            panic_with_error!(&env, Error::InsufficientLiquidity);
+        }
+
+        Self::set_total_shares(env.clone(), new_total_shares);
+        Self::set_total_assets(env.clone(), new_total_assets);
+        env.storage().persistent().set(&balance_key, &0i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingWithdrawals, &pending_withdrawals);
+
+        token_client.transfer(&contract_addr, &from, &assets_to_withdraw);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "EmergencyWithdraw"), from),
+            (
+                shares_to_redeem,
+                assets_to_withdraw,
+                new_total_assets,
+                new_total_shares,
+            ),
+        );
+
+        assets_to_withdraw
+    }
+
+    fn require_not_paused(env: &Env) {
+        if Self::paused(env) {
+            panic_with_error!(env, Error::ContractPaused);
+        }
+    }
+
+    fn require_paused(env: &Env) {
+        if !Self::paused(env) {
+            panic_with_error!(env, Error::ContractNotPaused);
+        }
+    }
+
+    // Deposit
     /// Deposits assets into the vault, minting shares for the depositor.
     ///
     /// # Arguments
@@ -224,6 +358,7 @@ impl VolatilityShield {
     /// * If `amount` is <= 0.
     /// * If `from` does not authorize the invocation.
     pub fn deposit(env: Env, from: Address, amount: i128) {
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic!("deposit amount must be positive");
         }
@@ -272,6 +407,7 @@ impl VolatilityShield {
     /// * If `from` does not authorize the invocation.
     /// * If `from` lacks sufficient shares.
     pub fn withdraw(env: Env, from: Address, shares: i128) {
+        Self::require_not_paused(&env);
         if shares <= 0 {
             panic!("shares to withdraw must be positive");
         }
@@ -334,6 +470,7 @@ impl VolatilityShield {
     /// `withdrawal_id`) and must be processed by the admin via
     /// `process_queued_withdrawal`.
     pub fn queue_withdraw(env: Env, from: Address, shares: i128) -> Result<u32, Error> {
+        Self::require_not_paused(&env);
         if shares <= 0 {
             panic!("shares to withdraw must be positive");
         }
@@ -415,6 +552,7 @@ impl VolatilityShield {
         caller: Address,
         withdrawal_id: u32,
     ) -> Result<(), Error> {
+        Self::require_not_paused(&env);
         caller.require_auth();
         let admin = Self::get_admin(&env);
         if caller != admin {
@@ -599,6 +737,7 @@ impl VolatilityShield {
     // ── Rebalance ─────────────────────────────
     /// Move funds between strategies according to stored `allocations`.
     pub fn rebalance(env: Env, caller: Address) {
+        Self::require_not_paused(&env);
         caller.require_auth();
         let admin = Self::get_admin(&env);
         let oracle = Self::get_oracle(&env);
@@ -842,6 +981,7 @@ impl VolatilityShield {
     /// * `Ok(total_yield)` containing the total harvested amount.
     /// * `Err(Error::NoStrategies)` if no strategies are registered.
     pub fn harvest(env: Env) -> Result<i128, Error> {
+        Self::require_not_paused(&env);
         let admin = Self::get_admin(&env);
         admin.require_auth();
 
@@ -999,6 +1139,7 @@ impl VolatilityShield {
         fee: i128,
         initiator: Address,
     ) {
+        Self::require_not_paused(&env);
         // Only an admin-authorized rebalance may use a flash loan.
         Self::get_admin(&env).require_auth();
 
@@ -1411,6 +1552,7 @@ impl VolatilityShield {
         amount: i128,
         memo: soroban_sdk::Bytes,
     ) -> Result<u64, Error> {
+        Self::require_not_paused(&env);
         caller.require_auth();
         let admin = Self::get_admin(&env);
         let oracle = Self::get_oracle(&env);
