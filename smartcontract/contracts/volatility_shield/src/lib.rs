@@ -386,7 +386,7 @@ impl VolatilityShield {
             panic_with_error!(&env, Error::NoBalance);
         }
 
-        let assets_to_withdraw = Self::convert_to_assets(env.clone(), shares_to_redeem);
+        let assets_to_withdraw = Self::convert_to_assets_lenient(env.clone(), shares_to_redeem);
         let total_shares = Self::total_shares(&env);
         let total_assets = Self::total_assets(&env);
         let new_total_shares = total_shares.checked_sub(shares_to_redeem).unwrap();
@@ -954,7 +954,12 @@ impl VolatilityShield {
     ///
     /// Reverts if the oracle's latest reading is stale beyond
     /// `SHARE_PRICE_MAX_STALENESS_SECONDS` (24 hours).
-    fn fetch_share_price(env: &Env, oracle: &Address) -> i128 {
+        /// Attempts to fetch the current asset price from the share-price oracle.
+    ///
+    /// Returns `None` when the oracle's latest reading is stale beyond
+    /// `SHARE_PRICE_MAX_STALENESS_SECONDS` or invalid, emitting a `Stale`
+    /// event for observability instead of reverting.
+    fn try_fetch_share_price(env: &Env, oracle: &Address) -> Option<i128> {
         let current_time = env.ledger().timestamp();
         let last_update: u64 = env.invoke_contract(
             oracle,
@@ -962,9 +967,16 @@ impl VolatilityShield {
             soroban_sdk::vec![env],
         );
 
-        if current_time > last_update
-            && current_time - last_update > Self::SHARE_PRICE_MAX_STALENESS_SECONDS
-        {
+        let stale =
+            current_time > last_update && current_time - last_update > Self::SHARE_PRICE_MAX_STALENESS_SECONDS;
+
+        let price: i128 = env.invoke_contract(
+            oracle,
+            &soroban_sdk::Symbol::new(env, "last_price"),
+            soroban_sdk::vec![env],
+        );
+
+        if stale || price <= 0 {
             env.events().publish(
                 (
                     soroban_sdk::Symbol::new(env, "SharePriceOracle"),
@@ -972,18 +984,21 @@ impl VolatilityShield {
                 ),
                 (last_update, current_time),
             );
-            panic!("Stale share price oracle");
+            return None;
         }
 
-        let price: i128 = env.invoke_contract(
-            oracle,
-            &soroban_sdk::Symbol::new(env, "last_price"),
-            soroban_sdk::vec![env],
-        );
-        if price <= 0 {
-            panic!("invalid share price");
+        Some(price)
+    }
+
+    /// Fetches the current asset price from the share-price oracle.
+    ///
+    /// Reverts if the oracle's latest reading is stale beyond
+    /// `SHARE_PRICE_MAX_STALENESS_SECONDS` (24 hours).
+    fn fetch_share_price(env: &Env, oracle: &Address) -> i128 {
+        match Self::try_fetch_share_price(env, oracle) {
+            Some(price) => price,
+            None => panic!("Stale share price oracle"),
         }
-        price
     }
 
     // ── Rebalance ─────────────────────────────
@@ -1691,6 +1706,38 @@ impl VolatilityShield {
                     .checked_div(Self::SHARE_PRICE_SCALE)
                     .unwrap()
             }
+            None => base_assets,
+        }
+    }
+
+    /// Like `convert_to_assets`, but degrades to proportional pricing when a
+    /// configured share-price oracle is stale or unreadable instead of
+    /// reverting. Used by the emergency exit so users can always recover
+    /// funds — safety over pricing precision during incidents.
+    fn convert_to_assets_lenient(env: Env, shares: i128) -> i128 {
+        if shares < 0 {
+            panic!("negative amount");
+        }
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+        if total_shares == 0 {
+            return shares;
+        }
+        let base_assets = shares
+            .checked_mul(total_assets)
+            .unwrap()
+            .checked_div(total_shares)
+            .unwrap();
+
+        match Self::get_share_price_oracle(&env) {
+            Some(oracle) => match Self::try_fetch_share_price(&env, &oracle) {
+                Some(price) => base_assets
+                    .checked_mul(price)
+                    .unwrap()
+                    .checked_div(Self::SHARE_PRICE_SCALE)
+                    .unwrap(),
+                None => base_assets,
+            },
             None => base_assets,
         }
     }

@@ -2498,3 +2498,86 @@ fn test_rebalance_slippage_cap_setter_admin_gated() {
     client.set_max_slippage_bps(&admin, &100u32);
     assert_eq!(client.get_max_slippage_bps(), 100);
 }
+
+// Oracle-staleness fallback for the emergency exit
+
+#[test]
+fn test_emergency_withdraw_falls_back_to_proportional_when_oracle_stale() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    // Price oracle set to 2x the 1e7 scale — if the stale reading were used,
+    // redemption would be 200_000 instead of the proportional 100_000.
+    let price_oracle_id = env.register(MockPriceOracle, ());
+    let price_oracle = MockPriceOracleClient::new(&env, &price_oracle_id);
+    price_oracle.set_price(&20_000_000i128);
+    client.set_share_price_oracle(&admin, &price_oracle_id);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    // Enter emergency mode, then let the oracle go stale (>24h).
+    client.emergency_pause();
+    price_oracle.set_timestamp(&0);
+    env.ledger().with_mut(|li| {
+        li.timestamp = 86_401;
+    });
+
+    // Emergency exit must succeed at proportional pricing despite staleness.
+    assert_eq!(client.emergency_withdraw(&admin), 100_000);
+    // 100k transferred in, 100k paid back out → admin is whole again.
+    assert_eq!(tc.balance(&admin), 100_000_000_000_000i128);
+    assert_eq!(tc.balance(&client.address), 0);
+    assert_eq!(client.total_shares(), 0);
+    assert_eq!(client.total_assets(), 0);
+}
+
+#[test]
+fn test_withdraw_still_reverts_when_oracle_stale() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    let price_oracle_id = env.register(MockPriceOracle, ());
+    let price_oracle = MockPriceOracleClient::new(&env, &price_oracle_id);
+    price_oracle.set_price(&20_000_000i128);
+    client.set_share_price_oracle(&admin, &price_oracle_id);
+
+    // Fund the vault so the strict-path withdrawal would otherwise succeed.
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    // Normal withdrawals keep the strict guard: stale oracle → reverted.
+    price_oracle.set_timestamp(&0);
+    env.ledger().with_mut(|li| {
+        li.timestamp = 86_401;
+    });
+
+    let res = client.try_withdraw(&admin, &500);
+    assert!(res.is_err());
+}
