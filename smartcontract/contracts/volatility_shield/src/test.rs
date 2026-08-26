@@ -1439,7 +1439,7 @@ fn test_upgrade() {
     client.set_total_assets(&5000);
 
     // Provide a valid WASM module to satisfy Soroban validation
-    let wasm = soroban_sdk::Bytes::from_slice(&env, include_bytes!("../test_snapshots/dummy.wasm"));
+    let wasm = soroban_sdk::Bytes::from_slice(&env, include_bytes!("../test_fixtures/dummy.wasm"));
     let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
 
     client.upgrade(&admin, &new_wasm_hash);
@@ -1487,9 +1487,10 @@ fn test_get_voting_power_proportional() {
     assert_eq!(client.get_voting_power(&user2), 4000);
 }
 
+// Governance tests (SC-29): guardians, proposals, voting, timelock
+
 #[test]
-#[should_panic(expected = "Error(Contract, #15)")]
-fn test_cast_vote_stub() {
+fn test_add_and_remove_guardian_admin_gated() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
 
@@ -1502,8 +1503,281 @@ fn test_cast_vote_stub() {
     let client = VolatilityShieldClient::new(&env, &contract_id);
     client.init(&admin, &asset, &oracle, &treasury, &0u32);
 
-    let voter = Address::generate(&env);
-    client.cast_vote(&voter, &1u32, &true);
+    let guardian = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    // Non-admin cannot add a guardian
+    assert_eq!(
+        client.try_add_guardian(&stranger, &guardian),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Admin adds the guardian
+    client.add_guardian(&admin, &guardian);
+    assert_eq!(client.get_guardians().len(), 2);
+
+    // Adding the same guardian twice is a no-op
+    client.add_guardian(&admin, &guardian);
+    assert_eq!(client.get_guardians().len(), 2);
+
+    // Admin removes the guardian
+    client.remove_guardian(&admin, &guardian);
+    assert_eq!(client.get_guardians().len(), 1);
+
+    // Removing a non-guardian fails
+    assert_eq!(
+        client.try_remove_guardian(&admin, &guardian),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn test_set_threshold_bounds() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // Threshold 0 is invalid (single guardian)
+    assert_eq!(
+        client.try_set_threshold(&admin, &0u32),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Threshold above the guardian count is invalid
+    assert_eq!(
+        client.try_set_threshold(&admin, &5u32),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Threshold 1 with one guardian is valid
+    client.set_threshold(&admin, &1u32);
+    assert_eq!(client.get_threshold(), 1);
+}
+
+#[test]
+fn test_propose_executes_immediately_at_threshold_one() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // Admin is the only guardian; threshold 1 → proposal executes immediately
+    let id = client.propose_action(
+        &admin,
+        &ActionType::SetPaused(true),
+    );
+    assert_eq!(id, 1);
+
+    let proposal = client.get_proposal(&id).unwrap();
+    assert!(proposal.executed);
+
+    // The action took effect: vault is paused
+    assert!(client.paused());
+}
+
+#[test]
+fn test_non_guardian_cannot_propose() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let stranger = Address::generate(&env);
+    assert_eq!(
+        client.try_propose_action(&stranger, &ActionType::SetThreshold(1u32)),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn test_multisig_proposal_requires_threshold_approvals() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let guardian1 = Address::generate(&env);
+    let guardian2 = Address::generate(&env);
+    client.add_guardian(&admin, &guardian1);
+    client.add_guardian(&admin, &guardian2);
+    client.set_threshold(&admin, &3u32); // admin + 2 guardians
+
+    // First approval proposes and records 1 of 3 approvals — not executed
+    let id = client.propose_action(
+        &guardian1,
+        &ActionType::SetPaused(true),
+    );
+    let proposal = client.get_proposal(&id).unwrap();
+    assert!(!proposal.executed);
+    assert_eq!(proposal.approvals.len(), 1);
+    assert!(!client.paused());
+
+    // Second approval — still below threshold
+    client.approve_action(&guardian2, &id);
+    assert!(!client.paused());
+
+    // Third approval reaches the threshold → executes
+    client.approve_action(&admin, &id);
+    assert!(client.paused());
+
+    let proposal = client.get_proposal(&id).unwrap();
+    assert!(proposal.executed);
+    assert_eq!(proposal.executed_ledger, env.ledger().sequence());
+}
+
+#[test]
+fn test_double_approval_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let guardian1 = Address::generate(&env);
+    client.add_guardian(&admin, &guardian1);
+    client.set_threshold(&admin, &2u32);
+
+    let id = client.propose_action(
+        &admin,
+        &ActionType::SetThreshold(2u32),
+    );
+
+    // The proposer already approved; approving again fails
+    assert_eq!(
+        client.try_approve_action(&admin, &id),
+        Err(Ok(Error::AlreadyApproved))
+    );
+
+    // A second guardian can still approve to reach the threshold
+    client.approve_action(&guardian1, &id);
+    let proposal = client.get_proposal(&id).unwrap();
+    assert!(proposal.executed);
+}
+
+#[test]
+fn test_timelock_blocks_execution_until_elapsed() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|ledger| ledger.timestamp = 42);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let guardian1 = Address::generate(&env);
+    client.add_guardian(&admin, &guardian1);
+    client.set_threshold(&admin, &2u32);
+    client.set_timelock_duration(&admin, &100u64);
+
+    let id = client.propose_action(
+        &guardian1,
+        &ActionType::SetPaused(true),
+    );
+
+    // Approving before the timelock elapses is rejected
+    assert_eq!(
+        client.try_approve_action(&admin, &id),
+        Err(Ok(Error::TimelockNotElapsed))
+    );
+    assert!(!client.paused());
+
+    // Advance past the timelock window and approve again → executes
+    env.ledger().with_mut(|ledger| ledger.timestamp = 42 + 101);
+    client.approve_action(&admin, &id);
+    assert!(client.paused());
+}
+
+#[test]
+fn test_cast_vote_weighted_tally_and_double_vote() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let guardian1 = Address::generate(&env);
+    client.add_guardian(&admin, &guardian1);
+    client.set_threshold(&admin, &2u32);
+
+    // Keep the proposal pending so token holders can vote on it
+    let id = client.propose_action(
+        &admin,
+        &ActionType::SetThreshold(2u32),
+    );
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    // Give users voting power via share balances (1 share = 5 assets)
+    client.set_total_shares(&1000);
+    client.set_total_assets(&5000);
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(user1.clone()), &200i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(user2.clone()), &800i128);
+    });
+
+    client.cast_vote(&user1, &id, &true);
+    client.cast_vote(&user2, &id, &false);
+
+    let tally = client.get_vote_tally(&id);
+    assert_eq!(tally.yes_votes, 1000); // 200 * 5000 / 1000
+    assert_eq!(tally.no_votes, 4000); // 800 * 5000 / 1000
+
+    // Double voting is rejected
+    assert_eq!(
+        client.try_cast_vote(&user1, &id, &true),
+        Err(Ok(Error::AlreadyApproved))
+    );
 }
 
 // Emergency circuit-breaker tests (SC-35)
@@ -2098,4 +2372,129 @@ fn test_process_queued_withdrawal_stale_oracle_reverted() {
     });
 
     client.process_queued_withdrawal(&admin, &id);
+}
+
+// Caps tests (deposit per-user + global, withdrawal per-tx)
+
+#[test]
+fn test_deposit_caps_admin_gated_and_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let stranger = Address::generate(&env);
+
+    // Non-admin cannot set caps
+    assert_eq!(
+        client.try_set_deposit_cap(&stranger, &100i128, &500i128),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Admin sets caps and they read back
+    client.set_deposit_cap(&admin, &100i128, &500i128);
+    assert_eq!(client.get_deposit_caps(), (100i128, 500i128));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_deposit_per_user_cap_blocks_second_deposit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_deposit_cap(&admin, &100i128, &0i128); // per-user cap only
+
+    // First deposit reaches exactly the per-user cap (1:1 share price)
+    let user = Address::generate(&env);
+    sac.mint(&user, &100i128);
+    client.deposit(&user, &100i128);
+
+    // A second deposit would exceed the per-user cap → CapExceeded
+    sac.mint(&user, &10i128);
+    client.deposit(&user, &10i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_global_deposit_cap_blocks_vault_total() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_deposit_cap(&admin, &0i128, &300i128); // global cap only
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    sac.mint(&user1, &250i128);
+    client.deposit(&user1, &250i128);
+
+    // This deposit would push total assets past the global cap → CapExceeded
+    sac.mint(&user2, &100i128);
+    client.deposit(&user2, &100i128);
+}
+
+#[test]
+fn test_global_deposit_cap_allows_within_headroom() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_deposit_cap(&admin, &0i128, &300i128);
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    sac.mint(&user1, &250i128);
+    client.deposit(&user1, &250i128);
+
+    // Within the remaining headroom still works
+    sac.mint(&user2, &50i128);
+    client.deposit(&user2, &50i128);
+    assert_eq!(client.total_assets(), 300);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_withdraw_cap_per_transaction() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_withdraw_cap(&admin, &150i128);
+    assert_eq!(client.get_withdraw_cap(), 150);
+
+    let user = Address::generate(&env);
+    sac.mint(&user, &400i128);
+    client.deposit(&user, &400i128);
+
+    // Withdrawing more than the per-tx cap → CapExceeded
+    client.withdraw(&user, &200i128);
+}
+
+// Slippage protection test
+
+#[test]
+fn test_rebalance_slippage_cap_setter_admin_gated() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let stranger = Address::generate(&env);
+
+    // Non-admin cannot set the slippage tolerance
+    assert_eq!(
+        client.try_set_max_slippage_bps(&stranger, &100u32),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Values above 10_000 BPS are invalid
+    assert_eq!(
+        client.try_set_max_slippage_bps(&admin, &20_000u32),
+        Err(Ok(Error::FeeTooHigh))
+    );
+
+    // Admin sets a valid tolerance
+    client.set_max_slippage_bps(&admin, &100u32);
+    assert_eq!(client.get_max_slippage_bps(), 100);
 }

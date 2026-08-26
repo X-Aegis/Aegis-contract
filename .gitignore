@@ -3,3 +3,6 @@ target/
 smartcontract/target/
 .soroban/
 .env.deploy
+
+# Soroban test snapshots — local-only artifacts (see TEST_SNAPSHOTS.md)
+test_snapshots/

@@ -1,4 +1,4 @@
-# Stellar Smart Contract Guide: Building with Soroban 🌟
+# XHedge (Aegis) — Smart Contract Guide: Building with Soroban 🌟
 
 Welcome to the comprehensive guide for building smart contracts on the Stellar network using **Soroban**. This guide is designed to help you understand the "why" and "how" of Stellar's ecosystem and get you shipping decentralized applications quickly.
 
