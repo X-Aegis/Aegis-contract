@@ -49,6 +49,19 @@ Emitted at the end of state-altering operations (like `Rebalance` and `Harvest`)
 
 ---
 
+## Strategy / ProtectionSet
+Emitted when the admin classifies a registered strategy as `Safe` or `Volatile` via `set_strategy_protection`. Indexers use this alongside oracle allocation events to compute `get_protection_status`.
+
+**Topics:**
+- `Strategy`
+- `ProtectionSet`
+
+**Payload:** (Tuple)
+1. `strategy`: Address (The strategy being classified)
+2. `status`: ProtectionStatus (`Safe` or `Volatile`)
+
+---
+
 ## VaultPaused
 Emitted after the admin activates the emergency circuit breaker.
 

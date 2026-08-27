@@ -118,6 +118,13 @@ pub enum DataKey {
     CrossChainRebalanceNonce,
     /// Governance token address for future governance integration.
     GovernanceToken,
+    /// Cumulative net principal (cost basis) deposited by a user, in
+    /// underlying asset units. Increases on deposit, decreases
+    /// proportionally to the fraction of shares removed on withdrawal.
+    Principal(Address),
+    /// Protection classification (`Safe` vs `Volatile`) for a registered
+    /// strategy, set by the admin via `set_strategy_protection`.
+    StrategyKind(Address),
     /// Multisig guardian registry.
     Guardians,
     /// Number of guardian approvals required to execute a proposal.
@@ -203,6 +210,33 @@ pub struct PendingWithdrawal {
     pub shares: i128,
     pub created_at: u64,
     pub processed: bool,
+}
+
+// ── Position Dashboard ─────────────────────
+
+/// Classifies a strategy's exposure so depositors can see whether their
+/// pooled funds are currently sitting in "safe" (capital-preserving) or
+/// "volatile" (growth/yield-seeking) allocations.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProtectionStatus {
+    Safe,
+    Volatile,
+}
+
+/// A user-facing snapshot of a depositor's position in the vault.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub struct UserPosition {
+    /// Net principal (cost basis) currently deposited, in underlying asset units.
+    pub deposited: i128,
+    /// Current share balance.
+    pub shares: i128,
+    /// Total shares queued for withdrawal but not yet processed.
+    pub pending_withdrawal: i128,
+    /// Current value of `shares` minus `deposited`. Can be negative if the
+    /// vault has lost value relative to the user's cost basis.
+    pub accrued_yield: i128,
 }
 
 impl<'a> StrategyClient<'a> {
@@ -557,6 +591,7 @@ impl VolatilityShield {
             &balance_key,
             &(current_balance.checked_add(shares_to_mint).unwrap()),
         );
+        Self::add_principal(&env, &from, amount);
 
         let new_total_shares = total_shares.checked_add(shares_to_mint).unwrap();
         let new_total_assets = total_assets.checked_add(amount).unwrap();
@@ -595,6 +630,7 @@ impl VolatilityShield {
         if current_balance < shares {
             panic!("insufficient shares for withdrawal");
         }
+        Self::reduce_principal(&env, &from, current_balance, shares);
 
         // --- Per-transaction withdrawal cap ---
         let max_withdraw_per_tx: i128 = env
@@ -713,7 +749,10 @@ impl VolatilityShield {
             .persistent()
             .set(&DataKey::PendingWithdrawals, &pending_withdrawals);
 
-        // Deduct shares immediately so they cannot be double-spent
+        // Deduct shares immediately so they cannot be double-spent, and
+        // reduce tracked principal proportionally since these shares are no
+        // longer at risk in the vault while queued.
+        Self::reduce_principal(&env, &from, current_balance, shares);
         env.storage().persistent().set(
             &balance_key,
             &(current_balance.checked_sub(shares).unwrap()),
@@ -1590,6 +1629,36 @@ impl VolatilityShield {
     }
 
     // ── Internal Helpers ──────────────────────
+
+    /// Adds `amount` to `user`'s tracked principal (cost basis).
+    fn add_principal(env: &Env, user: &Address, amount: i128) {
+        let key = DataKey::Principal(user.clone());
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&key, &(current.checked_add(amount).unwrap()));
+    }
+
+    /// Reduces `user`'s tracked principal by the same fraction that
+    /// `shares_removed` represents of `shares_before` (their share balance
+    /// prior to the removal). Keeps principal proportional to remaining
+    /// shares so `accrued_yield` stays meaningful after partial withdrawals.
+    fn reduce_principal(env: &Env, user: &Address, shares_before: i128, shares_removed: i128) {
+        if shares_before == 0 || shares_removed == 0 {
+            return;
+        }
+        let key = DataKey::Principal(user.clone());
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let removed = current
+            .checked_mul(shares_removed)
+            .unwrap()
+            .checked_div(shares_before)
+            .unwrap();
+        env.storage()
+            .persistent()
+            .set(&key, &(current - removed).max(0));
+    }
+
     /// Calculates and deducts the withdrawal fee from the provided asset amount, returning the net assets and fee taken.
     pub fn take_fees(env: &Env, amount: i128) -> (i128, i128) {
         let fee_pct = Self::effective_fee_pct(env);
@@ -2393,6 +2462,113 @@ impl VolatilityShield {
             return Err(Error::TimelockNotElapsed);
         }
         Ok(())
+    }
+
+    // ── Position Dashboard (SC-36) ─────────────
+
+    /// Returns a full snapshot of `user`'s position in the vault: their
+    /// deposited principal, current share balance, shares still queued for
+    /// withdrawal, and yield accrued so far (current value of `shares`
+    /// minus `deposited`).
+    pub fn get_user_position(env: Env, user: Address) -> UserPosition {
+        let shares = Self::balance(env.clone(), user.clone());
+        let deposited: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Principal(user.clone()))
+            .unwrap_or(0);
+        let current_value = Self::convert_to_assets(env.clone(), shares);
+        let accrued_yield = current_value - deposited;
+
+        let pending_withdrawals: Map<u32, PendingWithdrawal> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingWithdrawals)
+            .unwrap_or_else(|| Map::new(&env));
+        let mut pending_shares: i128 = 0;
+        for (_, pending) in pending_withdrawals.iter() {
+            if pending.from == user && !pending.processed {
+                pending_shares = pending_shares.checked_add(pending.shares).unwrap();
+            }
+        }
+
+        UserPosition {
+            deposited,
+            shares,
+            pending_withdrawal: pending_shares,
+            accrued_yield,
+        }
+    }
+
+    /// Classify a registered strategy as `Safe` or `Volatile`. Admin-only.
+    pub fn set_strategy_protection(
+        env: Env,
+        caller: Address,
+        strategy: Address,
+        status: ProtectionStatus,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        if !Self::get_strategies(&env).contains(strategy.clone()) {
+            return Err(Error::StrategyNotFound);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::StrategyKind(strategy.clone()), &status);
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Strategy"), soroban_sdk::Symbol::new(&env, "ProtectionSet")),
+            (strategy, status),
+        );
+        Ok(())
+    }
+
+    /// Returns the protection classification for a strategy. Unclassified
+    /// strategies default to `Volatile` (the conservative assumption).
+    pub fn get_strategy_protection(env: Env, strategy: Address) -> ProtectionStatus {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StrategyKind(strategy))
+            .unwrap_or(ProtectionStatus::Volatile)
+    }
+
+    /// Returns whether the vault's current oracle-driven allocation is
+    /// weighted toward `Safe` or `Volatile` strategies: `Safe` when at least
+    /// half of allocated basis points sit in strategies classified `Safe`.
+    ///
+    /// Deposits are pooled, so every depositor shares the same allocation
+    /// mix — `user` is accepted for symmetry with `get_user_position` and to
+    /// support a future per-tranche allocation model.
+    pub fn get_protection_status(env: Env, _user: Address) -> ProtectionStatus {
+        let allocations: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleAllocations)
+            .unwrap_or_else(|| Map::new(&env));
+
+        if allocations.is_empty() {
+            // No live allocation yet — capital sits idle in the vault,
+            // which carries no strategy risk.
+            return ProtectionStatus::Safe;
+        }
+
+        let mut safe_bps: i128 = 0;
+        let mut total_bps: i128 = 0;
+        for (strategy_addr, alloc_bps) in allocations.iter() {
+            total_bps += alloc_bps;
+            if Self::get_strategy_protection(env.clone(), strategy_addr) == ProtectionStatus::Safe
+            {
+                safe_bps += alloc_bps;
+            }
+        }
+
+        if total_bps > 0 && safe_bps * 2 >= total_bps {
+            ProtectionStatus::Safe
+        } else {
+            ProtectionStatus::Volatile
+        }
     }
 
     // ── Contract Upgrade ──────────────────────

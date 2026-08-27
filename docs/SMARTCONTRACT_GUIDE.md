@@ -156,4 +156,82 @@ Run it with `cargo test`.
 - **Rust Book:** Essential for mastering the language quirks.
 
 ---
+
+## 8. Position Dashboard: Public Read Functions 📊
+
+The `VolatilityShield` vault exposes a set of read-only functions so a frontend
+can render a user's live position without any privileged access. None of
+these require `require_auth()` — they only read storage.
+
+### `get_user_position(user: Address) -> UserPosition`
+
+Returns a full snapshot of `user`'s position:
+
+```rust
+pub struct UserPosition {
+    pub deposited: i128,          // Net principal (cost basis) currently deposited
+    pub shares: i128,             // Current share balance
+    pub pending_withdrawal: i128, // Shares queued via queue_withdraw, not yet processed
+    pub accrued_yield: i128,      // Current value of `shares` minus `deposited`
+}
+```
+
+- `deposited` is the user's cost basis: it grows by the deposited `amount` on
+  every `deposit`, and shrinks proportionally to the fraction of shares
+  removed on `withdraw` / `queue_withdraw`.
+- `accrued_yield` is `convert_to_assets(shares) - deposited`. It can be
+  negative if the vault has lost value relative to the user's cost basis.
+- `pending_withdrawal` sums the `shares` of every entry in the withdrawal
+  queue (see `queue_withdraw`) belonging to `user` that has not yet been
+  settled by `process_queued_withdrawal`.
+
+### `get_protection_status(user: Address) -> ProtectionStatus`
+
+```rust
+pub enum ProtectionStatus {
+    Safe,
+    Volatile,
+}
+```
+
+Since the vault pools all deposits, every depositor is exposed to the same
+allocation mix — there is no per-user allocation. `get_protection_status`
+reports that shared status: it sums the oracle-driven allocation (set via
+`set_oracle_data`) across strategies and returns `Safe` when at least half of
+the allocated basis points sit in strategies classified `Safe`, otherwise
+`Volatile`. With no live allocation, capital sits idle in the vault (no
+strategy risk), so the status defaults to `Safe`.
+
+The `user` parameter is accepted for symmetry with `get_user_position` and to
+leave room for a future per-tranche allocation model; today it does not
+change the result.
+
+### `get_strategy_protection(strategy: Address) -> ProtectionStatus`
+
+Returns how a specific registered strategy is classified. Unclassified
+strategies default to `Volatile` (the conservative assumption) until the
+admin calls `set_strategy_protection`.
+
+### `set_strategy_protection(caller: Address, strategy: Address, status: ProtectionStatus) -> Result<(), Error>`
+
+Admin-only. Classifies a registered strategy as `Safe` or `Volatile`, driving
+the result of `get_protection_status`. Fails with `Error::Unauthorized` if
+`caller` is not the admin, or `Error::StrategyNotFound` if `strategy` was
+never registered via `add_strategy`. Emits a `Strategy / ProtectionSet`
+event — see [`docs/EVENT_SCHEMA.md`](./EVENT_SCHEMA.md).
+
+### Related read functions
+
+- `balance(user: Address) -> i128` — a user's raw share balance (used
+  internally by `get_user_position`).
+- `total_assets(env) / total_shares(env)` — vault-wide totals, used to price
+  shares via `convert_to_assets` / `convert_to_shares`.
+- `get_pending_withdrawal(withdrawal_id: u32) -> Option<PendingWithdrawal>` —
+  look up a single queued withdrawal by ID.
+
+For the full event payloads emitted on `deposit` / `withdraw` (which already
+carry `total_assets`, `total_shares`, and — for withdrawals — the `fee`
+taken), see [`docs/EVENT_SCHEMA.md`](./EVENT_SCHEMA.md).
+
+---
 *Happy Building! 🚀*
