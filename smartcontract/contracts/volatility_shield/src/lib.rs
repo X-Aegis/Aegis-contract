@@ -58,6 +58,16 @@ pub enum Error {
     WithdrawalNotFound = 13,
     WithdrawalAlreadyProcessed = 14,
     NotImplemented = 15,
+    ContractPaused = 16,
+    ContractNotPaused = 17,
+    NoBalance = 18,
+    InsufficientLiquidity = 19,
+    ProposalNotFound = 20,
+    ProposalExecuted = 21,
+    AlreadyApproved = 22,
+    TimelockNotElapsed = 23,
+    CapExceeded = 24,
+    SlippageExceeded = 25,
 }
 
 // ─────────────────────────────────────────────
@@ -71,6 +81,9 @@ pub enum DataKey {
     Admin,
     Asset,
     Oracle,
+    /// Address of the price oracle that feeds the current asset price into
+    /// share-price calculations (SC-34).
+    SharePriceOracle,
     TotalAssets,
     TotalShares,
     Strategies,
@@ -112,6 +125,69 @@ pub enum DataKey {
     /// Protection classification (`Safe` vs `Volatile`) for a registered
     /// strategy, set by the admin via `set_strategy_protection`.
     StrategyKind(Address),
+    /// Multisig guardian registry.
+    Guardians,
+    /// Number of guardian approvals required to execute a proposal.
+    Threshold,
+    /// Map of proposal ID → Proposal.
+    Proposals,
+    /// Ordered list of proposal IDs.
+    ProposalIds,
+    /// Monotonically incrementing counter for proposal IDs.
+    NextProposalId,
+    /// Records whether an address has already voted on a proposal.
+    VoteRecord(u64, Address),
+    /// Tally of yes/no votes for a proposal.
+    VoteTally(u64),
+    /// Delay (in seconds) before an approved proposal can execute.
+    TimelockDuration,
+    /// Maximum shares a single user may hold, enforced at deposit.
+    MaxDepositPerUser,
+    /// Maximum total assets the vault accepts.
+    MaxTotalAssets,
+    /// Maximum shares withdrawable in a single transaction.
+    MaxWithdrawPerTx,
+    /// Maximum allowed deviation between expected and actual strategy
+    /// balance after a rebalance, in basis points.
+    MaxSlippageBps,
+    /// Global emergency circuit-breaker state.
+    Paused,
+}
+
+// ─────────────────────────────────────────────
+// Governance types
+// ─────────────────────────────────────────────
+
+/// The type of action a governance proposal can execute once approved.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActionType {
+    /// Pause or unpause the vault.
+    SetPaused(bool),
+    /// Change the multisig approval threshold.
+    SetThreshold(u32),
+}
+
+/// A pending governance proposal that requires a threshold of guardian
+/// approvals before its action is executed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub action: ActionType,
+    pub approvals: Vec<Address>,
+    pub executed: bool,
+    pub executed_ledger: u32,
+    pub proposed_at: u64,
+}
+
+/// Vote tally for a governance proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteTally {
+    pub yes_votes: i128,
+    pub no_votes: i128,
 }
 
 // ─────────────────────────────────────────────
@@ -220,6 +296,12 @@ pub struct VolatilityShield;
 
 #[contractimpl]
 impl VolatilityShield {
+    /// Scale applied to share-price oracle readings (1e7, i.e. 1.0000000).
+    const SHARE_PRICE_SCALE: i128 = 10_000_000;
+    /// Maximum age of a share-price oracle reading before it is considered
+    /// stale (24 hours in seconds).
+    const SHARE_PRICE_MAX_STALENESS_SECONDS: u64 = 24 * 60 * 60;
+
     // ── Initialization ────────────────────────
     /// Must be called once. Stores roles and configuration.
     pub fn init(
@@ -244,9 +326,204 @@ impl VolatilityShield {
             .instance()
             .set(&DataKey::FeePercentage, &fee_percentage);
         env.storage().instance().set(&DataKey::Token, &asset);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        // Governance: admin is the initial guardian, threshold of 1 (admin-only
+        // execution until more guardians are added).
+        env.storage()
+            .instance()
+            .set(&DataKey::Guardians, &soroban_sdk::vec![&env, admin.clone()]);
+        env.storage().instance().set(&DataKey::Threshold, &1_u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposals, &Map::<u64, Proposal>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalIds, &Vec::<u64>::new(&env));
+        env.storage().instance().set(&DataKey::NextProposalId, &1_u64);
+        env.storage().instance().set(&DataKey::TimelockDuration, &0_u64);
     }
 
-    // ── Deposit ───────────────────────────────
+    // Emergency circuit breaker
+    /// Returns whether emergency mode is active.
+    ///
+    /// Missing state defaults to `false` so contracts deployed before this
+    /// storage key was introduced remain operable after an upgrade.
+    pub fn paused(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    /// Activates emergency mode. Admin-only.
+    pub fn emergency_pause(env: Env) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+        if Self::paused(&env) {
+            panic_with_error!(&env, Error::ContractPaused);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "VaultPaused"), admin),
+            env.ledger().timestamp(),
+        );
+    }
+
+    /// Deactivates emergency mode and restores normal operations. Admin-only.
+    pub fn emergency_unpause(env: Env) {
+        let admin = Self::get_admin(&env);
+        admin.require_auth();
+        if !Self::paused(&env) {
+            panic_with_error!(&env, Error::ContractNotPaused);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "VaultUnpaused"), admin),
+            env.ledger().timestamp(),
+        );
+    }
+
+    /// Redeems all of a user's economic shares while emergency mode is active.
+    ///
+    /// Both freely-held shares and unprocessed queued withdrawals are redeemed
+    /// at the current proportional share price. No withdrawal fee is charged.
+    /// Queued entries are marked processed atomically to prevent later payout.
+    pub fn emergency_withdraw(env: Env, from: Address) -> i128 {
+        from.require_auth();
+        Self::require_paused(&env);
+
+        let balance_key = DataKey::Balance(from.clone());
+        let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+        let mut pending_withdrawals: Map<u32, PendingWithdrawal> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingWithdrawals)
+            .unwrap_or_else(|| Map::new(&env));
+        let pending_ids = pending_withdrawals.keys();
+        let mut queued_shares = 0i128;
+
+        for withdrawal_id in pending_ids.iter() {
+            let mut pending = pending_withdrawals
+                .get(withdrawal_id)
+                .expect("pending withdrawal key must exist");
+            if pending.from == from && !pending.processed {
+                queued_shares = queued_shares.checked_add(pending.shares).unwrap();
+                pending.processed = true;
+                pending_withdrawals.set(withdrawal_id, pending);
+            }
+        }
+
+        let shares_to_redeem = current_balance.checked_add(queued_shares).unwrap();
+        if shares_to_redeem <= 0 {
+            panic_with_error!(&env, Error::NoBalance);
+        }
+
+        let assets_to_withdraw = Self::convert_to_assets_lenient(env.clone(), shares_to_redeem);
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+        let new_total_shares = total_shares.checked_sub(shares_to_redeem).unwrap();
+        let new_total_assets = total_assets.checked_sub(assets_to_withdraw).unwrap();
+
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .expect("Token not initialized");
+        let token_client = token::Client::new(&env, &token_addr);
+        let contract_addr = env.current_contract_address();
+        if token_client.balance(&contract_addr) < assets_to_withdraw {
+            panic_with_error!(&env, Error::InsufficientLiquidity);
+        }
+
+        Self::set_total_shares(env.clone(), new_total_shares);
+        Self::set_total_assets(env.clone(), new_total_assets);
+        env.storage().persistent().set(&balance_key, &0i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingWithdrawals, &pending_withdrawals);
+
+        token_client.transfer(&contract_addr, &from, &assets_to_withdraw);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "EmergencyWithdraw"), from),
+            (
+                shares_to_redeem,
+                assets_to_withdraw,
+                new_total_assets,
+                new_total_shares,
+            ),
+        );
+
+        assets_to_withdraw
+    }
+
+    fn require_not_paused(env: &Env) {
+        if Self::paused(env) {
+            panic_with_error!(env, Error::ContractPaused);
+        }
+    }
+
+    fn require_paused(env: &Env) {
+        if !Self::paused(env) {
+            panic_with_error!(env, Error::ContractNotPaused);
+        }
+    }
+
+    /// Verifies each strategy's post-rebalance balance sits within
+    /// `max_slippage_bps` of its target allocation. Reverts the whole
+    /// rebalance via `SlippageExceeded` on any violation.
+    fn verify_rebalance_slippage(
+        env: &Env,
+        allocations: &Map<Address, i128>,
+        initial_balances: &Map<Address, i128>,
+        total_assets: i128,
+        max_slippage_bps: u32,
+    ) {
+        for (strategy_addr, target_allocation) in allocations.iter() {
+            let Some(initial_balance) = initial_balances.get(strategy_addr.clone()) else {
+                continue;
+            };
+            if initial_balance == 0 {
+                continue;
+            }
+
+            let strategy = StrategyClient::new(env, strategy_addr.clone());
+            let final_balance = strategy.balance();
+
+            let expected_balance = total_assets
+                .checked_mul(target_allocation)
+                .unwrap()
+                .checked_div(10_000)
+                .unwrap_or(0);
+
+            if expected_balance == 0 {
+                continue;
+            }
+
+            let slippage_abs = if final_balance > expected_balance {
+                final_balance - expected_balance
+            } else {
+                expected_balance - final_balance
+            };
+
+            let slippage_bps = slippage_abs
+                .checked_mul(10_000)
+                .unwrap()
+                .checked_div(expected_balance)
+                .unwrap_or(0);
+
+            if slippage_bps > max_slippage_bps as i128 {
+                env.events().publish(
+                    (soroban_sdk::Symbol::new(env, "Slippage"), soroban_sdk::Symbol::new(env, "Exceeded")),
+                    (strategy_addr.clone(), expected_balance, final_balance, slippage_bps),
+                );
+                panic_with_error!(env, Error::SlippageExceeded);
+            }
+        }
+    }
+
+    // Deposit
     /// Deposits assets into the vault, minting shares for the depositor.
     ///
     /// # Arguments
@@ -258,6 +535,7 @@ impl VolatilityShield {
     /// * If `amount` is <= 0.
     /// * If `from` does not authorize the invocation.
     pub fn deposit(env: Env, from: Address, amount: i128) {
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic!("deposit amount must be positive");
         }
@@ -274,14 +552,47 @@ impl VolatilityShield {
 
         let balance_key = DataKey::Balance(from.clone());
         let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+
+        // --- Deposit caps validation ---
+        let max_per_user: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxDepositPerUser)
+            .unwrap_or(0);
+        if max_per_user > 0 {
+            let new_balance = current_balance.checked_add(shares_to_mint).unwrap();
+            if new_balance > max_per_user {
+                env.events().publish(
+                    (soroban_sdk::Symbol::new(&env, "Cap"), soroban_sdk::Symbol::new(&env, "Breached")),
+                    (from.clone(), amount),
+                );
+                panic_with_error!(&env, Error::CapExceeded);
+            }
+        }
+
+        let max_total_assets: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxTotalAssets)
+            .unwrap_or(0);
+        if max_total_assets > 0 && total_assets.checked_add(amount).unwrap() > max_total_assets {
+            env.events().publish(
+                (soroban_sdk::Symbol::new(&env, "Cap"), soroban_sdk::Symbol::new(&env, "Breached")),
+                (from.clone(), amount),
+            );
+            panic_with_error!(&env, Error::CapExceeded);
+        }
+        // -------------------------------
+
         env.storage().persistent().set(
             &balance_key,
             &(current_balance.checked_add(shares_to_mint).unwrap()),
         );
         Self::add_principal(&env, &from, amount);
 
-        let total_shares = Self::total_shares(&env);
-        let total_assets = Self::total_assets(&env);
         let new_total_shares = total_shares.checked_add(shares_to_mint).unwrap();
         let new_total_assets = total_assets.checked_add(amount).unwrap();
         Self::set_total_shares(env.clone(), new_total_shares);
@@ -307,6 +618,7 @@ impl VolatilityShield {
     /// * If `from` does not authorize the invocation.
     /// * If `from` lacks sufficient shares.
     pub fn withdraw(env: Env, from: Address, shares: i128) {
+        Self::require_not_paused(&env);
         if shares <= 0 {
             panic!("shares to withdraw must be positive");
         }
@@ -319,6 +631,21 @@ impl VolatilityShield {
             panic!("insufficient shares for withdrawal");
         }
         Self::reduce_principal(&env, &from, current_balance, shares);
+
+        // --- Per-transaction withdrawal cap ---
+        let max_withdraw_per_tx: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxWithdrawPerTx)
+            .unwrap_or(0);
+        if max_withdraw_per_tx > 0 && shares > max_withdraw_per_tx {
+            env.events().publish(
+                (soroban_sdk::Symbol::new(&env, "Cap"), soroban_sdk::Symbol::new(&env, "Breached")),
+                (from.clone(), shares),
+            );
+            panic_with_error!(&env, Error::CapExceeded);
+        }
+        // -------------------------------
 
         let assets_to_withdraw = Self::convert_to_assets(env.clone(), shares);
         let (net_assets, fee) = Self::take_fees(&env, assets_to_withdraw);
@@ -370,6 +697,7 @@ impl VolatilityShield {
     /// `withdrawal_id`) and must be processed by the admin via
     /// `process_queued_withdrawal`.
     pub fn queue_withdraw(env: Env, from: Address, shares: i128) -> Result<u32, Error> {
+        Self::require_not_paused(&env);
         if shares <= 0 {
             panic!("shares to withdraw must be positive");
         }
@@ -454,6 +782,7 @@ impl VolatilityShield {
         caller: Address,
         withdrawal_id: u32,
     ) -> Result<(), Error> {
+        Self::require_not_paused(&env);
         caller.require_auth();
         let admin = Self::get_admin(&env);
         if caller != admin {
@@ -635,9 +964,86 @@ impl VolatilityShield {
         }
     }
 
+    // ── Share Price Oracle (SC-34) ─────────────
+    /// Updates the address of the share-price oracle. Admin-only.
+    /// Emits a `SharePriceOracleUpdated` event.
+    pub fn set_share_price_oracle(env: Env, caller: Address, oracle: Address) {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            panic!("Unauthorized");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::SharePriceOracle, &oracle);
+        env.events().publish(
+            (
+                soroban_sdk::Symbol::new(&env, "SharePriceOracle"),
+                soroban_sdk::Symbol::new(&env, "Updated"),
+            ),
+            oracle,
+        );
+    }
+
+    /// Returns the address of the configured share-price oracle, if any.
+    pub fn get_share_price_oracle(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::SharePriceOracle)
+    }
+
+    /// Fetches the current asset price from the share-price oracle.
+    ///
+    /// Reverts if the oracle's latest reading is stale beyond
+    /// `SHARE_PRICE_MAX_STALENESS_SECONDS` (24 hours).
+        /// Attempts to fetch the current asset price from the share-price oracle.
+    ///
+    /// Returns `None` when the oracle's latest reading is stale beyond
+    /// `SHARE_PRICE_MAX_STALENESS_SECONDS` or invalid, emitting a `Stale`
+    /// event for observability instead of reverting.
+    fn try_fetch_share_price(env: &Env, oracle: &Address) -> Option<i128> {
+        let current_time = env.ledger().timestamp();
+        let last_update: u64 = env.invoke_contract(
+            oracle,
+            &soroban_sdk::Symbol::new(env, "last_timestamp"),
+            soroban_sdk::vec![env],
+        );
+
+        let stale =
+            current_time > last_update && current_time - last_update > Self::SHARE_PRICE_MAX_STALENESS_SECONDS;
+
+        let price: i128 = env.invoke_contract(
+            oracle,
+            &soroban_sdk::Symbol::new(env, "last_price"),
+            soroban_sdk::vec![env],
+        );
+
+        if stale || price <= 0 {
+            env.events().publish(
+                (
+                    soroban_sdk::Symbol::new(env, "SharePriceOracle"),
+                    soroban_sdk::Symbol::new(env, "Stale"),
+                ),
+                (last_update, current_time),
+            );
+            return None;
+        }
+
+        Some(price)
+    }
+
+    /// Fetches the current asset price from the share-price oracle.
+    ///
+    /// Reverts if the oracle's latest reading is stale beyond
+    /// `SHARE_PRICE_MAX_STALENESS_SECONDS` (24 hours).
+    fn fetch_share_price(env: &Env, oracle: &Address) -> i128 {
+        match Self::try_fetch_share_price(env, oracle) {
+            Some(price) => price,
+            None => panic!("Stale share price oracle"),
+        }
+    }
+
     // ── Rebalance ─────────────────────────────
     /// Move funds between strategies according to stored `allocations`.
     pub fn rebalance(env: Env, caller: Address) {
+        Self::require_not_paused(&env);
         caller.require_auth();
         let admin = Self::get_admin(&env);
         let oracle = Self::get_oracle(&env);
@@ -679,6 +1085,22 @@ impl VolatilityShield {
         let vault = env.current_contract_address();
         let total_assets = Self::total_assets(&env);
 
+        let max_slippage_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxSlippageBps)
+            .unwrap_or(0);
+
+        // Capture pre-rebalance balances so post-trade deviation can be
+        // verified against the slippage tolerance.
+        let mut initial_balances: Map<Address, i128> = Map::new(&env);
+        for (strategy_addr, _alloc_bps) in allocations.iter() {
+            initial_balances.set(
+                strategy_addr.clone(),
+                StrategyClient::new(&env, strategy_addr.clone()).balance(),
+            );
+        }
+
         for (strategy_addr, alloc_bps) in allocations.iter() {
             let target_allocation = (total_assets * alloc_bps) / 10000;
             let strategy = StrategyClient::new(&env, strategy_addr.clone());
@@ -695,6 +1117,15 @@ impl VolatilityShield {
             }
         }
         
+                // --- Slippage verification ---
+        // After moving funds, each strategy's actual balance must be within
+        // the configured tolerance of its target allocation, otherwise the
+        // whole rebalance is reverted (Soroban transactions are atomic).
+        if max_slippage_bps > 0 {
+            Self::verify_rebalance_slippage(&env, &allocations, &initial_balances, total_assets, max_slippage_bps);
+        }
+        // -------------------------------
+
         let final_assets = Self::total_assets(&env);
         let final_shares = Self::total_shares(&env);
         env.events().publish((soroban_sdk::Symbol::new(&env, "Rebalance"),), allocations);
@@ -881,6 +1312,7 @@ impl VolatilityShield {
     /// * `Ok(total_yield)` containing the total harvested amount.
     /// * `Err(Error::NoStrategies)` if no strategies are registered.
     pub fn harvest(env: Env) -> Result<i128, Error> {
+        Self::require_not_paused(&env);
         let admin = Self::get_admin(&env);
         admin.require_auth();
 
@@ -1038,6 +1470,7 @@ impl VolatilityShield {
         fee: i128,
         initiator: Address,
     ) {
+        Self::require_not_paused(&env);
         // Only an admin-authorized rebalance may use a flash loan.
         Self::get_admin(&env).require_auth();
 
@@ -1314,6 +1747,10 @@ impl VolatilityShield {
     }
 
     /// Converts an amount of shares to the equivalent amount of underlying assets, rounding down.
+    ///
+    /// When a share-price oracle is configured, the redemption is priced at the
+    /// oracle's current asset price (scaled by `SHARE_PRICE_SCALE`), reverting if
+    /// the oracle reading is stale.
     pub fn convert_to_assets(env: Env, shares: i128) -> i128 {
         if shares < 0 {
             panic!("negative amount");
@@ -1323,11 +1760,55 @@ impl VolatilityShield {
         if total_shares == 0 {
             return shares;
         }
-        shares
+        let base_assets = shares
             .checked_mul(total_assets)
             .unwrap()
             .checked_div(total_shares)
+            .unwrap();
+
+        match Self::get_share_price_oracle(&env) {
+            Some(oracle) => {
+                let price = Self::fetch_share_price(&env, &oracle);
+                base_assets
+                    .checked_mul(price)
+                    .unwrap()
+                    .checked_div(Self::SHARE_PRICE_SCALE)
+                    .unwrap()
+            }
+            None => base_assets,
+        }
+    }
+
+    /// Like `convert_to_assets`, but degrades to proportional pricing when a
+    /// configured share-price oracle is stale or unreadable instead of
+    /// reverting. Used by the emergency exit so users can always recover
+    /// funds — safety over pricing precision during incidents.
+    fn convert_to_assets_lenient(env: Env, shares: i128) -> i128 {
+        if shares < 0 {
+            panic!("negative amount");
+        }
+        let total_shares = Self::total_shares(&env);
+        let total_assets = Self::total_assets(&env);
+        if total_shares == 0 {
+            return shares;
+        }
+        let base_assets = shares
+            .checked_mul(total_assets)
             .unwrap()
+            .checked_div(total_shares)
+            .unwrap();
+
+        match Self::get_share_price_oracle(&env) {
+            Some(oracle) => match Self::try_fetch_share_price(&env, &oracle) {
+                Some(price) => base_assets
+                    .checked_mul(price)
+                    .unwrap()
+                    .checked_div(Self::SHARE_PRICE_SCALE)
+                    .unwrap(),
+                None => base_assets,
+            },
+            None => base_assets,
+        }
     }
 
     /// Internally updates the total assets storage.
@@ -1480,6 +1961,7 @@ impl VolatilityShield {
         amount: i128,
         memo: soroban_sdk::Bytes,
     ) -> Result<u64, Error> {
+        Self::require_not_paused(&env);
         caller.require_auth();
         let admin = Self::get_admin(&env);
         let oracle = Self::get_oracle(&env);
@@ -1525,7 +2007,7 @@ impl VolatilityShield {
         Ok(next_nonce)
     }
 
-    // ── Governance Token (SC-29) ──────────────
+    // ── Governance (SC-29) ────────────────────
 
     /// Set the governance token address. Admin-only.
     pub fn set_governance_token(env: Env, caller: Address, token: Address) {
@@ -1559,10 +2041,427 @@ impl VolatilityShield {
         (user_shares * total_assets) / total_shares
     }
 
-    /// Cast a vote. Currently unimplemented.
-    pub fn cast_vote(env: Env, voter: Address, _proposal_id: u32, _support: bool) {
+    /// Add a guardian to the multisig. Admin-only.
+    pub fn add_guardian(env: Env, caller: Address, guardian: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        let mut guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&env));
+        if guardians.contains(guardian.clone()) {
+            return Ok(());
+        }
+        guardians.push_back(guardian.clone());
+        env.storage().instance().set(&DataKey::Guardians, &guardians);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Guardian"), soroban_sdk::Symbol::new(&env, "Added")),
+            guardian,
+        );
+        Ok(())
+    }
+
+    /// Remove a guardian from the multisig. Admin-only.
+    pub fn remove_guardian(env: Env, caller: Address, guardian: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        let mut guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&env));
+        let index = guardians
+            .first_index_of(guardian.clone())
+            .ok_or(Error::Unauthorized)?;
+        guardians.remove(index);
+        env.storage().instance().set(&DataKey::Guardians, &guardians);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Guardian"), soroban_sdk::Symbol::new(&env, "Removed")),
+            guardian,
+        );
+        Ok(())
+    }
+
+    /// Set the number of guardian approvals required to execute a proposal.
+    /// Admin-only. Must be between 1 and the number of guardians.
+    pub fn set_threshold(env: Env, caller: Address, threshold: u32) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        let guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&env));
+        if threshold == 0 || threshold > guardians.len() {
+            return Err(Error::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Threshold, &threshold);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Threshold"), soroban_sdk::Symbol::new(&env, "Set")),
+            threshold,
+        );
+        Ok(())
+    }
+
+    /// Return the current guardian registry.
+    pub fn get_guardians(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Return the current approval threshold.
+    pub fn get_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(1)
+    }
+
+    /// Propose a governance action. Only guardians can propose.
+    ///
+    /// When the threshold is 1 the action executes immediately (subject to the
+    /// timelock); otherwise it stays pending until enough guardians approve.
+    pub fn propose_action(env: Env, proposer: Address, action: ActionType) -> Result<u64, Error> {
+        proposer.require_auth();
+
+        let guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .ok_or(Error::NotInitialized)?;
+        if !guardians.contains(proposer.clone()) {
+            return Err(Error::Unauthorized);
+        }
+
+        let id = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextProposalId, &(id + 1));
+
+        let proposed_at = env.ledger().timestamp();
+        let mut proposal = Proposal {
+            id,
+            proposer: proposer.clone(),
+            action: action.clone(),
+            approvals: soroban_sdk::vec![&env, proposer.clone()],
+            executed: false,
+            executed_ledger: 0,
+            proposed_at,
+        };
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Proposal"), soroban_sdk::Symbol::new(&env, "Created")),
+            id,
+        );
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Timelock"), soroban_sdk::Symbol::new(&env, "Started")),
+            (id, proposed_at),
+        );
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(1);
+        if threshold <= 1 {
+            match Self::execute_action(&env, &action, proposed_at) {
+                Ok(()) => {
+                    proposal.executed = true;
+                    proposal.executed_ledger = env.ledger().sequence();
+                }
+                Err(Error::TimelockNotElapsed) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        let mut proposals: Map<u64, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env));
+        proposals.set(id, proposal);
+        env.storage().instance().set(&DataKey::Proposals, &proposals);
+        let mut proposal_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalIds)
+            .unwrap_or(Vec::new(&env));
+        proposal_ids.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalIds, &proposal_ids);
+
+        Ok(id)
+    }
+
+    /// Approve a pending proposal. Only guardians can approve, and only once.
+    /// When the approval threshold is reached the action is executed.
+    pub fn approve_action(env: Env, guardian: Address, proposal_id: u64) -> Result<(), Error> {
+        guardian.require_auth();
+
+        let guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .ok_or(Error::NotInitialized)?;
+        if !guardians.contains(guardian.clone()) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut proposals: Map<u64, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .ok_or(Error::NotInitialized)?;
+        let mut proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(Error::ProposalExecuted);
+        }
+        if proposal.approvals.contains(guardian.clone()) {
+            return Err(Error::AlreadyApproved);
+        }
+
+        proposal.approvals.push_back(guardian.clone());
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Proposal"), soroban_sdk::Symbol::new(&env, "Approved")),
+            (proposal_id, guardian.clone()),
+        );
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(1);
+        if proposal.approvals.len() >= threshold {
+            Self::execute_action(&env, &proposal.action, proposal.proposed_at)?;
+            proposal.executed = true;
+            proposal.executed_ledger = env.ledger().sequence();
+        }
+
+        proposals.set(proposal_id, proposal);
+        env.storage().instance().set(&DataKey::Proposals, &proposals);
+
+        Ok(())
+    }
+
+    /// Cast a vote on a proposal, weighted by the voter's voting power.
+    /// Each address may vote only once per proposal.
+    pub fn cast_vote(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        support: bool,
+    ) -> Result<(), Error> {
         voter.require_auth();
-        panic_with_error!(&env, Error::NotImplemented);
+
+        let proposals: Map<u64, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .ok_or(Error::NotInitialized)?;
+        let proposal = proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+        if proposal.executed {
+            return Err(Error::ProposalExecuted);
+        }
+
+        let vote_key = DataKey::VoteRecord(proposal_id, voter.clone());
+        if env.storage().instance().has(&vote_key) {
+            return Err(Error::AlreadyApproved);
+        }
+        env.storage().instance().set(&vote_key, &true);
+
+        let voting_power = Self::get_voting_power(env.clone(), voter.clone());
+        let tally_key = DataKey::VoteTally(proposal_id);
+        let mut tally: VoteTally = env
+            .storage()
+            .instance()
+            .get(&tally_key)
+            .unwrap_or(VoteTally {
+                yes_votes: 0,
+                no_votes: 0,
+            });
+
+        if support {
+            tally.yes_votes = tally.yes_votes.checked_add(voting_power).unwrap_or(i128::MAX);
+        } else {
+            tally.no_votes = tally.no_votes.checked_add(voting_power).unwrap_or(i128::MAX);
+        }
+        env.storage().instance().set(&tally_key, &tally);
+
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Vote"), soroban_sdk::Symbol::new(&env, "Cast")),
+            (proposal_id, support, voting_power),
+        );
+
+        Ok(())
+    }
+
+    /// Get the current yes/no tally for a proposal.
+    pub fn get_vote_tally(env: Env, proposal_id: u64) -> VoteTally {
+        env.storage()
+            .instance()
+            .get(&DataKey::VoteTally(proposal_id))
+            .unwrap_or(VoteTally {
+                yes_votes: 0,
+                no_votes: 0,
+            })
+    }
+
+    /// Get a proposal by ID.
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Option<Proposal> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env))
+            .get(proposal_id)
+    }
+
+    /// Set the timelock duration (in seconds) that must elapse before an
+    /// approved proposal can execute. Admin-only.
+    pub fn set_timelock_duration(env: Env, caller: Address, duration: u64) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::TimelockDuration, &duration);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Timelock"), soroban_sdk::Symbol::new(&env, "DurationSet")),
+            duration,
+        );
+        Ok(())
+    }
+
+    /// Set deposit caps: per-user share limit and global asset limit.
+    /// Admin-only. Zero disables a cap.
+    pub fn set_deposit_cap(env: Env, caller: Address, per_user: i128, global: i128) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        if per_user < 0 || global < 0 {
+            return Err(Error::NegativeAmount);
+        }
+        env.storage().instance().set(&DataKey::MaxDepositPerUser, &per_user);
+        env.storage().instance().set(&DataKey::MaxTotalAssets, &global);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Caps"), soroban_sdk::Symbol::new(&env, "Deposit")),
+            (per_user, global),
+        );
+        Ok(())
+    }
+
+    /// Set the per-transaction withdrawal cap. Admin-only. Zero disables it.
+    pub fn set_withdraw_cap(env: Env, caller: Address, per_tx: i128) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        if per_tx < 0 {
+            return Err(Error::NegativeAmount);
+        }
+        env.storage().instance().set(&DataKey::MaxWithdrawPerTx, &per_tx);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Caps"), soroban_sdk::Symbol::new(&env, "Withdraw")),
+            per_tx,
+        );
+        Ok(())
+    }
+
+    /// Read the configured deposit caps (per-user, global). Zero = disabled.
+    pub fn get_deposit_caps(env: Env) -> (i128, i128) {
+        (
+            env.storage().instance().get(&DataKey::MaxDepositPerUser).unwrap_or(0),
+            env.storage().instance().get(&DataKey::MaxTotalAssets).unwrap_or(0),
+        )
+    }
+
+    /// Read the per-transaction withdrawal cap. Zero = disabled.
+    pub fn get_withdraw_cap(env: Env) -> i128 {
+        env.storage().instance().get(&DataKey::MaxWithdrawPerTx).unwrap_or(0)
+    }
+
+    /// Set the maximum allowed deviation between expected and actual
+    /// strategy balances after a rebalance, in basis points. Admin-only.
+    pub fn set_max_slippage_bps(env: Env, caller: Address, bps: u32) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != Self::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        if bps > 10_000 {
+            return Err(Error::FeeTooHigh);
+        }
+        env.storage().instance().set(&DataKey::MaxSlippageBps, &bps);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "Slippage"), soroban_sdk::Symbol::new(&env, "CapSet")),
+            bps,
+        );
+        Ok(())
+    }
+
+    /// Read the rebalance slippage tolerance in basis points.
+    pub fn get_max_slippage_bps(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::MaxSlippageBps).unwrap_or(0)
+    }
+
+    fn execute_action(env: &Env, action: &ActionType, proposed_at: u64) -> Result<(), Error> {
+        Self::assert_timelock_elapsed(env, proposed_at)?;
+        match action {
+            ActionType::SetPaused(state) => {
+                env.storage().instance().set(&DataKey::Paused, state);
+                env.events().publish(
+                    (
+                        soroban_sdk::Symbol::new(env, "VaultPaused"),
+                        soroban_sdk::Symbol::new(env, "Governance"),
+                    ),
+                    state,
+                );
+            }
+            ActionType::SetThreshold(threshold) => {
+                env.storage().instance().set(&DataKey::Threshold, threshold);
+            }
+        }
+        env.events().publish(
+            (soroban_sdk::Symbol::new(env, "Proposal"), soroban_sdk::Symbol::new(env, "Executed")),
+            (),
+        );
+        env.events().publish(
+            (soroban_sdk::Symbol::new(env, "Timelock"), soroban_sdk::Symbol::new(env, "Executed")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn assert_timelock_elapsed(env: &Env, proposed_at: u64) -> Result<(), Error> {
+        let timelock_duration: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TimelockDuration)
+            .unwrap_or(0);
+        if timelock_duration == 0 {
+            return Ok(());
+        }
+        let now = env.ledger().timestamp();
+        let elapsed = now.saturating_sub(proposed_at);
+        if elapsed < timelock_duration {
+            return Err(Error::TimelockNotElapsed);
+        }
+        Ok(())
     }
 
     // ── Position Dashboard (SC-36) ─────────────

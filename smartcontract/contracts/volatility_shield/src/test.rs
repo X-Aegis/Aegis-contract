@@ -3,11 +3,58 @@ use super::*;
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    Address, Env, Map,
+    testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
+    Address, Env, IntoVal, Map, Symbol,
 };
 
 extern crate mock_strategy;
+
+#[soroban_sdk::contract]
+struct RejectingToken;
+
+#[soroban_sdk::contractimpl]
+impl RejectingToken {
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        100
+    }
+
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
+        panic!("simulated token transfer failure");
+    }
+}
+
+#[soroban_sdk::contract]
+struct MockPriceOracle;
+
+#[soroban_sdk::contractimpl]
+impl MockPriceOracle {
+    pub fn set_price(env: Env, price: i128) {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "price"), &price);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "ts"), &env.ledger().timestamp());
+    }
+
+    pub fn set_timestamp(env: Env, ts: u64) {
+        env.storage().instance().set(&Symbol::new(&env, "ts"), &ts);
+    }
+
+    pub fn last_price(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "price"))
+            .unwrap_or(10_000_000)
+    }
+
+    pub fn last_timestamp(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "ts"))
+            .unwrap_or(0)
+    }
+}
 
 fn create_token_contract<'a>(
     env: &Env,
@@ -17,6 +64,10 @@ fn create_token_contract<'a>(
     let stellar_asset_client = StellarAssetClient::new(env, &contract_id.address());
     let token_client = TokenClient::new(env, &contract_id.address());
     (contract_id.address(), stellar_asset_client, token_client)
+}
+
+fn contract_error(error: Error) -> soroban_sdk::Error {
+    soroban_sdk::Error::from_contract_error(error as u32)
 }
 
 #[test]
@@ -1388,7 +1439,7 @@ fn test_upgrade() {
     client.set_total_assets(&5000);
 
     // Provide a valid WASM module to satisfy Soroban validation
-    let wasm = soroban_sdk::Bytes::from_slice(&env, include_bytes!("../test_snapshots/dummy.wasm"));
+    let wasm = soroban_sdk::Bytes::from_slice(&env, include_bytes!("../test_fixtures/dummy.wasm"));
     let new_wasm_hash = env.deployer().upload_contract_wasm(wasm);
 
     client.upgrade(&admin, &new_wasm_hash);
@@ -1421,8 +1472,12 @@ fn test_get_voting_power_proportional() {
 
     // Mock balance
     env.as_contract(&contract_id, || {
-        env.storage().persistent().set(&DataKey::Balance(user1.clone()), &200i128); // 200 shares
-        env.storage().persistent().set(&DataKey::Balance(user2.clone()), &800i128); // 800 shares
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(user1.clone()), &200i128); // 200 shares
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(user2.clone()), &800i128); // 800 shares
     });
 
     // Proportional voting power
@@ -1634,10 +1689,10 @@ fn test_protection_status_volatile_when_majority_allocation_volatile() {
         ProtectionStatus::Volatile
     );
 }
+// Governance tests (SC-29): guardians, proposals, voting, timelock
 
 #[test]
-#[should_panic(expected = "Error(Contract, #15)")]
-fn test_cast_vote_stub() {
+fn test_add_and_remove_guardian_admin_gated() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
 
@@ -1650,6 +1705,1081 @@ fn test_cast_vote_stub() {
     let client = VolatilityShieldClient::new(&env, &contract_id);
     client.init(&admin, &asset, &oracle, &treasury, &0u32);
 
-    let voter = Address::generate(&env);
-    client.cast_vote(&voter, &1u32, &true);
+    let guardian = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    // Non-admin cannot add a guardian
+    assert_eq!(
+        client.try_add_guardian(&stranger, &guardian),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Admin adds the guardian
+    client.add_guardian(&admin, &guardian);
+    assert_eq!(client.get_guardians().len(), 2);
+
+    // Adding the same guardian twice is a no-op
+    client.add_guardian(&admin, &guardian);
+    assert_eq!(client.get_guardians().len(), 2);
+
+    // Admin removes the guardian
+    client.remove_guardian(&admin, &guardian);
+    assert_eq!(client.get_guardians().len(), 1);
+
+    // Removing a non-guardian fails
+    assert_eq!(
+        client.try_remove_guardian(&admin, &guardian),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn test_set_threshold_bounds() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // Threshold 0 is invalid (single guardian)
+    assert_eq!(
+        client.try_set_threshold(&admin, &0u32),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Threshold above the guardian count is invalid
+    assert_eq!(
+        client.try_set_threshold(&admin, &5u32),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Threshold 1 with one guardian is valid
+    client.set_threshold(&admin, &1u32);
+    assert_eq!(client.get_threshold(), 1);
+}
+
+#[test]
+fn test_propose_executes_immediately_at_threshold_one() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // Admin is the only guardian; threshold 1 → proposal executes immediately
+    let id = client.propose_action(
+        &admin,
+        &ActionType::SetPaused(true),
+    );
+    assert_eq!(id, 1);
+
+    let proposal = client.get_proposal(&id).unwrap();
+    assert!(proposal.executed);
+
+    // The action took effect: vault is paused
+    assert!(client.paused());
+}
+
+#[test]
+fn test_non_guardian_cannot_propose() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let stranger = Address::generate(&env);
+    assert_eq!(
+        client.try_propose_action(&stranger, &ActionType::SetThreshold(1u32)),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn test_multisig_proposal_requires_threshold_approvals() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let guardian1 = Address::generate(&env);
+    let guardian2 = Address::generate(&env);
+    client.add_guardian(&admin, &guardian1);
+    client.add_guardian(&admin, &guardian2);
+    client.set_threshold(&admin, &3u32); // admin + 2 guardians
+
+    // First approval proposes and records 1 of 3 approvals — not executed
+    let id = client.propose_action(
+        &guardian1,
+        &ActionType::SetPaused(true),
+    );
+    let proposal = client.get_proposal(&id).unwrap();
+    assert!(!proposal.executed);
+    assert_eq!(proposal.approvals.len(), 1);
+    assert!(!client.paused());
+
+    // Second approval — still below threshold
+    client.approve_action(&guardian2, &id);
+    assert!(!client.paused());
+
+    // Third approval reaches the threshold → executes
+    client.approve_action(&admin, &id);
+    assert!(client.paused());
+
+    let proposal = client.get_proposal(&id).unwrap();
+    assert!(proposal.executed);
+    assert_eq!(proposal.executed_ledger, env.ledger().sequence());
+}
+
+#[test]
+fn test_double_approval_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let guardian1 = Address::generate(&env);
+    client.add_guardian(&admin, &guardian1);
+    client.set_threshold(&admin, &2u32);
+
+    let id = client.propose_action(
+        &admin,
+        &ActionType::SetThreshold(2u32),
+    );
+
+    // The proposer already approved; approving again fails
+    assert_eq!(
+        client.try_approve_action(&admin, &id),
+        Err(Ok(Error::AlreadyApproved))
+    );
+
+    // A second guardian can still approve to reach the threshold
+    client.approve_action(&guardian1, &id);
+    let proposal = client.get_proposal(&id).unwrap();
+    assert!(proposal.executed);
+}
+
+#[test]
+fn test_timelock_blocks_execution_until_elapsed() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|ledger| ledger.timestamp = 42);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let guardian1 = Address::generate(&env);
+    client.add_guardian(&admin, &guardian1);
+    client.set_threshold(&admin, &2u32);
+    client.set_timelock_duration(&admin, &100u64);
+
+    let id = client.propose_action(
+        &guardian1,
+        &ActionType::SetPaused(true),
+    );
+
+    // Approving before the timelock elapses is rejected
+    assert_eq!(
+        client.try_approve_action(&admin, &id),
+        Err(Ok(Error::TimelockNotElapsed))
+    );
+    assert!(!client.paused());
+
+    // Advance past the timelock window and approve again → executes
+    env.ledger().with_mut(|ledger| ledger.timestamp = 42 + 101);
+    client.approve_action(&admin, &id);
+    assert!(client.paused());
+}
+
+#[test]
+fn test_cast_vote_weighted_tally_and_double_vote() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let guardian1 = Address::generate(&env);
+    client.add_guardian(&admin, &guardian1);
+    client.set_threshold(&admin, &2u32);
+
+    // Keep the proposal pending so token holders can vote on it
+    let id = client.propose_action(
+        &admin,
+        &ActionType::SetThreshold(2u32),
+    );
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    // Give users voting power via share balances (1 share = 5 assets)
+    client.set_total_shares(&1000);
+    client.set_total_assets(&5000);
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(user1.clone()), &200i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(user2.clone()), &800i128);
+    });
+
+    client.cast_vote(&user1, &id, &true);
+    client.cast_vote(&user2, &id, &false);
+
+    let tally = client.get_vote_tally(&id);
+    assert_eq!(tally.yes_votes, 1000); // 200 * 5000 / 1000
+    assert_eq!(tally.no_votes, 4000); // 800 * 5000 / 1000
+
+    // Double voting is rejected
+    assert_eq!(
+        client.try_cast_vote(&user1, &id, &true),
+        Err(Ok(Error::AlreadyApproved))
+    );
+}
+
+// Emergency circuit-breaker tests (SC-35)
+
+#[test]
+fn test_emergency_pause_state_transitions_and_events() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().with_mut(|ledger| ledger.timestamp = 42);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    assert!(!client.paused());
+    client.emergency_pause();
+    assert_eq!(
+        env.events().all(),
+        soroban_sdk::vec![
+            &env,
+            (
+                contract_id.clone(),
+                (Symbol::new(&env, "VaultPaused"), admin.clone()).into_val(&env),
+                42u64.into_val(&env),
+            ),
+        ]
+    );
+    assert!(client.paused());
+    assert_eq!(
+        client.try_emergency_pause(),
+        Err(Ok(contract_error(Error::ContractPaused)))
+    );
+
+    env.ledger().with_mut(|ledger| ledger.timestamp = 84);
+    client.emergency_unpause();
+    assert_eq!(
+        env.events().all(),
+        soroban_sdk::vec![
+            &env,
+            (
+                contract_id,
+                (Symbol::new(&env, "VaultUnpaused"), admin).into_val(&env),
+                84u64.into_val(&env),
+            ),
+        ]
+    );
+    assert!(!client.paused());
+    assert_eq!(
+        client.try_emergency_unpause(),
+        Err(Ok(contract_error(Error::ContractNotPaused)))
+    );
+}
+
+#[test]
+fn test_emergency_pause_requires_admin_authorization() {
+    let env = Env::default();
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    assert!(client.try_emergency_pause().is_err());
+    assert!(!client.paused());
+}
+
+#[test]
+fn test_paused_vault_blocks_normal_operations_and_rebalance_routes() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let token_admin = Address::generate(&env);
+    let (token, sac, _tc) = create_token_contract(&env, &token_admin);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+    sac.mint(&user, &100i128);
+    client.set_balance(&user, &100i128);
+    client.set_total_shares(&100i128);
+    client.set_total_assets(&100i128);
+
+    client.emergency_pause();
+
+    assert_eq!(
+        client.try_deposit(&user, &1i128),
+        Err(Ok(contract_error(Error::ContractPaused)))
+    );
+    assert_eq!(
+        client.try_withdraw(&user, &1i128),
+        Err(Ok(contract_error(Error::ContractPaused)))
+    );
+    assert!(client.try_queue_withdraw(&user, &1i128).is_err());
+    assert_eq!(
+        client.try_rebalance(&admin),
+        Err(Ok(contract_error(Error::ContractPaused)))
+    );
+    assert_eq!(client.try_harvest(), Err(Ok(Error::ContractPaused)));
+
+    assert_eq!(client.balance(&user), 100);
+    assert_eq!(client.total_shares(), 100);
+    assert_eq!(client.total_assets(), 100);
+}
+
+#[test]
+fn test_emergency_withdraw_requires_paused_state() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    assert_eq!(
+        client.try_emergency_withdraw(&user),
+        Err(Ok(contract_error(Error::ContractNotPaused)))
+    );
+}
+
+#[test]
+fn test_emergency_withdraw_redeems_full_balance_at_nav_without_fee() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let token_admin = Address::generate(&env);
+    let (token, sac, tc) = create_token_contract(&env, &token_admin);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &token, &oracle, &treasury, &500u32);
+
+    sac.mint(&user, &1_000i128);
+    client.deposit(&user, &1_000i128);
+    sac.mint(&contract_id, &500i128);
+    client.set_total_assets(&1_500i128);
+
+    client.emergency_pause();
+    assert_eq!(client.emergency_withdraw(&user), 1_500);
+
+    assert_eq!(client.balance(&user), 0);
+    assert_eq!(client.total_shares(), 0);
+    assert_eq!(client.total_assets(), 0);
+    assert_eq!(tc.balance(&user), 1_500);
+    assert_eq!(tc.balance(&treasury), 0);
+    assert_eq!(
+        client.try_emergency_withdraw(&user),
+        Err(Ok(contract_error(Error::NoBalance)))
+    );
+}
+
+#[test]
+fn test_emergency_withdraw_reconciles_pending_queue_without_double_payout() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let token_admin = Address::generate(&env);
+    let (token, sac, tc) = create_token_contract(&env, &token_admin);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    sac.mint(&user, &1_000i128);
+    client.deposit(&user, &1_000i128);
+    client.set_withdraw_queue_threshold(&admin, &500i128);
+    let withdrawal_id = client.queue_withdraw(&user, &600i128);
+    assert_eq!(client.balance(&user), 400);
+
+    client.emergency_pause();
+    assert_eq!(client.emergency_withdraw(&user), 1_000);
+    assert_eq!(tc.balance(&user), 1_000);
+    assert!(
+        client
+            .get_pending_withdrawal(&withdrawal_id)
+            .unwrap()
+            .processed
+    );
+
+    client.emergency_unpause();
+    assert_eq!(
+        client.try_process_queued_withdrawal(&admin, &withdrawal_id),
+        Err(Ok(Error::WithdrawalAlreadyProcessed))
+    );
+}
+
+#[test]
+fn test_emergency_withdraw_isolates_multiple_users_and_preserves_nav() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let token_admin = Address::generate(&env);
+    let (token, sac, tc) = create_token_contract(&env, &token_admin);
+    let admin = Address::generate(&env);
+    let user_one = Address::generate(&env);
+    let user_two = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    sac.mint(&user_one, &400i128);
+    sac.mint(&user_two, &600i128);
+    client.deposit(&user_one, &400i128);
+    client.deposit(&user_two, &600i128);
+    sac.mint(&contract_id, &500i128);
+    client.set_total_assets(&1_500i128);
+
+    client.emergency_pause();
+    assert_eq!(client.emergency_withdraw(&user_one), 600);
+    assert_eq!(client.balance(&user_two), 600);
+    assert_eq!(client.total_shares(), 600);
+    assert_eq!(client.total_assets(), 900);
+    assert_eq!(tc.balance(&user_one), 600);
+
+    assert_eq!(client.emergency_withdraw(&user_two), 900);
+    assert_eq!(tc.balance(&user_two), 900);
+    assert_eq!(client.total_shares(), 0);
+    assert_eq!(client.total_assets(), 0);
+}
+
+#[test]
+fn test_emergency_withdraw_insufficient_liquidity_preserves_state_and_queue() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let token_admin = Address::generate(&env);
+    let (token, _sac, _tc) = create_token_contract(&env, &token_admin);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+    client.set_balance(&user, &100i128);
+    client.set_total_shares(&100i128);
+    client.set_total_assets(&100i128);
+    client.set_withdraw_queue_threshold(&admin, &50i128);
+    let withdrawal_id = client.queue_withdraw(&user, &60i128);
+
+    client.emergency_pause();
+    assert_eq!(
+        client.try_emergency_withdraw(&user),
+        Err(Ok(contract_error(Error::InsufficientLiquidity)))
+    );
+
+    assert_eq!(client.balance(&user), 40);
+    assert_eq!(client.total_shares(), 100);
+    assert_eq!(client.total_assets(), 100);
+    assert!(
+        !client
+            .get_pending_withdrawal(&withdrawal_id)
+            .unwrap()
+            .processed
+    );
+}
+
+#[test]
+fn test_unpause_restores_deposit_withdraw_and_queue_flow() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let token_admin = Address::generate(&env);
+    let (token, sac, tc) = create_token_contract(&env, &token_admin);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+    sac.mint(&user, &1_000i128);
+
+    client.emergency_pause();
+    assert!(client.try_deposit(&user, &1_000i128).is_err());
+    client.emergency_unpause();
+
+    client.deposit(&user, &1_000i128);
+    client.withdraw(&user, &100i128);
+    client.set_withdraw_queue_threshold(&admin, &100i128);
+    assert_eq!(client.queue_withdraw(&user, &100i128), 1);
+    assert_eq!(client.balance(&user), 800);
+    assert_eq!(tc.balance(&user), 100);
+}
+
+#[test]
+fn test_emergency_withdraw_requires_user_authorization() {
+    let env = Env::default();
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_balance(&user, &100i128);
+    client.set_total_shares(&100i128);
+    client.set_total_assets(&100i128);
+
+    client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "emergency_pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .emergency_pause();
+
+    assert!(client.try_emergency_withdraw(&user).is_err());
+    assert_eq!(client.balance(&user), 100);
+    assert_eq!(client.total_shares(), 100);
+    assert_eq!(client.total_assets(), 100);
+}
+
+#[test]
+fn test_emergency_withdraw_reconciles_mixed_multiuser_queue_state() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let token_admin = Address::generate(&env);
+    let (token, sac, tc) = create_token_contract(&env, &token_admin);
+    let admin = Address::generate(&env);
+    let user_one = Address::generate(&env);
+    let user_two = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    sac.mint(&user_one, &600i128);
+    sac.mint(&user_two, &400i128);
+    client.deposit(&user_one, &600i128);
+    client.deposit(&user_two, &400i128);
+    client.set_withdraw_queue_threshold(&admin, &1i128);
+
+    let processed_one = client.queue_withdraw(&user_one, &100i128);
+    let pending_one_a = client.queue_withdraw(&user_one, &200i128);
+    let pending_two = client.queue_withdraw(&user_two, &100i128);
+    let pending_one_b = client.queue_withdraw(&user_one, &50i128);
+    client.process_queued_withdrawal(&admin, &processed_one);
+
+    sac.mint(&contract_id, &450i128);
+    client.set_total_assets(&1_350i128);
+    client.emergency_pause();
+
+    assert_eq!(
+        client.try_process_queued_withdrawal(&admin, &pending_two),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert_eq!(client.emergency_withdraw(&user_one), 750);
+
+    assert!(
+        client
+            .get_pending_withdrawal(&processed_one)
+            .unwrap()
+            .processed
+    );
+    assert!(
+        client
+            .get_pending_withdrawal(&pending_one_a)
+            .unwrap()
+            .processed
+    );
+    assert!(
+        client
+            .get_pending_withdrawal(&pending_one_b)
+            .unwrap()
+            .processed
+    );
+    assert!(
+        !client
+            .get_pending_withdrawal(&pending_two)
+            .unwrap()
+            .processed
+    );
+    assert_eq!(client.balance(&user_one), 0);
+    assert_eq!(client.balance(&user_two), 300);
+    assert_eq!(client.total_shares(), 400);
+    assert_eq!(client.total_assets(), 600);
+    assert_eq!(tc.balance(&user_one), 850);
+    assert_eq!(
+        client.try_emergency_withdraw(&user_one),
+        Err(Ok(contract_error(Error::NoBalance)))
+    );
+
+    assert_eq!(client.emergency_withdraw(&user_two), 600);
+    assert_eq!(tc.balance(&user_two), 600);
+    assert_eq!(client.total_shares(), 0);
+    assert_eq!(client.total_assets(), 0);
+}
+
+#[test]
+fn test_emergency_withdraw_token_failure_rolls_back_state() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let token = env.register(RejectingToken, ());
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+    client.set_balance(&user, &100i128);
+    client.set_total_shares(&100i128);
+    client.set_total_assets(&100i128);
+    client.set_withdraw_queue_threshold(&admin, &1i128);
+    let pending_id = client.queue_withdraw(&user, &40i128);
+    client.emergency_pause();
+
+    assert!(client.try_emergency_withdraw(&user).is_err());
+
+    assert_eq!(client.balance(&user), 60);
+    assert_eq!(client.total_shares(), 100);
+    assert_eq!(client.total_assets(), 100);
+    assert!(
+        !client
+            .get_pending_withdrawal(&pending_id)
+            .unwrap()
+            .processed
+    );
+}
+
+#[test]
+fn test_emergency_withdraw_rounding_conserves_all_assets() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let token_admin = Address::generate(&env);
+    let (token, sac, tc) = create_token_contract(&env, &token_admin);
+    let admin = Address::generate(&env);
+    let user_one = Address::generate(&env);
+    let user_two = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    sac.mint(&user_one, &1i128);
+    sac.mint(&user_two, &2i128);
+    client.deposit(&user_one, &1i128);
+    client.deposit(&user_two, &2i128);
+    sac.mint(&contract_id, &97i128);
+    client.set_total_assets(&100i128);
+    client.emergency_pause();
+
+    assert_eq!(client.emergency_withdraw(&user_one), 33);
+    assert_eq!(client.total_shares(), 2);
+    assert_eq!(client.total_assets(), 67);
+    assert_eq!(client.emergency_withdraw(&user_two), 67);
+
+    assert_eq!(tc.balance(&user_one), 33);
+    assert_eq!(tc.balance(&user_two), 67);
+    assert_eq!(client.total_shares(), 0);
+    assert_eq!(client.total_assets(), 0);
+    assert_eq!(tc.balance(&contract_id), 0);
+}
+
+// ── Share Price Oracle (SC-34) tests ─────────────────────────────────────
+
+#[test]
+fn test_share_price_oracle_update() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // No share-price oracle is configured by default.
+    assert_eq!(client.get_share_price_oracle(), None);
+
+    let price_oracle = Address::generate(&env);
+    client.set_share_price_oracle(&admin, &price_oracle);
+
+    // A SharePriceOracleUpdated event must be emitted.
+    assert_eq!(
+        env.events().all(),
+        soroban_sdk::vec![
+            &env,
+            (
+                contract_id,
+                (
+                    Symbol::new(&env, "SharePriceOracle"),
+                    Symbol::new(&env, "Updated")
+                )
+                    .into_val(&env),
+                price_oracle.clone().into_val(&env),
+            ),
+        ]
+    );
+
+    assert_eq!(
+        client.get_share_price_oracle(),
+        Some(price_oracle.clone())
+    );
+
+    // Non-admin updates must be rejected.
+    let attacker = Address::generate(&env);
+    let res = client.try_set_share_price_oracle(&attacker, &price_oracle);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_convert_to_assets_uses_share_price_oracle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    // Deploy a mock price oracle reporting price = 2.0 (scale 1e7).
+    let price_oracle_id = env.register(MockPriceOracle, ());
+    let price_oracle = MockPriceOracleClient::new(&env, &price_oracle_id);
+    price_oracle.set_price(&20_000_000i128);
+
+    client.set_total_assets(&100);
+    client.set_total_shares(&100);
+
+    // Without a configured oracle the conversion is the naive 1:1.
+    assert_eq!(client.convert_to_assets(&50), 50);
+
+    // With a fresh oracle at 2.0 the conversion is scaled by the price.
+    client.set_share_price_oracle(&admin, &price_oracle_id);
+    assert_eq!(client.convert_to_assets(&50), 100);
+}
+
+#[test]
+#[should_panic(expected = "Stale share price oracle")]
+fn test_process_queued_withdrawal_stale_oracle_reverted() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    let price_oracle_id = env.register(MockPriceOracle, ());
+    let price_oracle = MockPriceOracleClient::new(&env, &price_oracle_id);
+    price_oracle.set_price(&10_000_000i128);
+
+    client.set_share_price_oracle(&admin, &price_oracle_id);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+    client.set_withdraw_queue_threshold(&admin, &500);
+
+    let id = client.queue_withdraw(&admin, &600);
+
+    // Advance time so the oracle's last update is > 24h in the past.
+    price_oracle.set_timestamp(&0);
+    env.ledger().with_mut(|li| {
+        li.timestamp = 86_401;
+    });
+
+    client.process_queued_withdrawal(&admin, &id);
+}
+
+// Caps tests (deposit per-user + global, withdrawal per-tx)
+
+#[test]
+fn test_deposit_caps_admin_gated_and_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let stranger = Address::generate(&env);
+
+    // Non-admin cannot set caps
+    assert_eq!(
+        client.try_set_deposit_cap(&stranger, &100i128, &500i128),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Admin sets caps and they read back
+    client.set_deposit_cap(&admin, &100i128, &500i128);
+    assert_eq!(client.get_deposit_caps(), (100i128, 500i128));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_deposit_per_user_cap_blocks_second_deposit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_deposit_cap(&admin, &100i128, &0i128); // per-user cap only
+
+    // First deposit reaches exactly the per-user cap (1:1 share price)
+    let user = Address::generate(&env);
+    sac.mint(&user, &100i128);
+    client.deposit(&user, &100i128);
+
+    // A second deposit would exceed the per-user cap → CapExceeded
+    sac.mint(&user, &10i128);
+    client.deposit(&user, &10i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_global_deposit_cap_blocks_vault_total() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_deposit_cap(&admin, &0i128, &300i128); // global cap only
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    sac.mint(&user1, &250i128);
+    client.deposit(&user1, &250i128);
+
+    // This deposit would push total assets past the global cap → CapExceeded
+    sac.mint(&user2, &100i128);
+    client.deposit(&user2, &100i128);
+}
+
+#[test]
+fn test_global_deposit_cap_allows_within_headroom() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_deposit_cap(&admin, &0i128, &300i128);
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    sac.mint(&user1, &250i128);
+    client.deposit(&user1, &250i128);
+
+    // Within the remaining headroom still works
+    sac.mint(&user2, &50i128);
+    client.deposit(&user2, &50i128);
+    assert_eq!(client.total_assets(), 300);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_withdraw_cap_per_transaction() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sac, _tc, _token) = setup_vault(&env);
+
+    client.set_withdraw_cap(&admin, &150i128);
+    assert_eq!(client.get_withdraw_cap(), 150);
+
+    let user = Address::generate(&env);
+    sac.mint(&user, &400i128);
+    client.deposit(&user, &400i128);
+
+    // Withdrawing more than the per-tx cap → CapExceeded
+    client.withdraw(&user, &200i128);
+}
+
+// Slippage protection test
+
+#[test]
+fn test_rebalance_slippage_cap_setter_admin_gated() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _sac, _tc, _token) = setup_vault(&env);
+
+    let stranger = Address::generate(&env);
+
+    // Non-admin cannot set the slippage tolerance
+    assert_eq!(
+        client.try_set_max_slippage_bps(&stranger, &100u32),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Values above 10_000 BPS are invalid
+    assert_eq!(
+        client.try_set_max_slippage_bps(&admin, &20_000u32),
+        Err(Ok(Error::FeeTooHigh))
+    );
+
+    // Admin sets a valid tolerance
+    client.set_max_slippage_bps(&admin, &100u32);
+    assert_eq!(client.get_max_slippage_bps(), 100);
+}
+
+// Oracle-staleness fallback for the emergency exit
+
+#[test]
+fn test_emergency_withdraw_falls_back_to_proportional_when_oracle_stale() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    // Price oracle set to 2x the 1e7 scale — if the stale reading were used,
+    // redemption would be 200_000 instead of the proportional 100_000.
+    let price_oracle_id = env.register(MockPriceOracle, ());
+    let price_oracle = MockPriceOracleClient::new(&env, &price_oracle_id);
+    price_oracle.set_price(&20_000_000i128);
+    client.set_share_price_oracle(&admin, &price_oracle_id);
+
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    // Enter emergency mode, then let the oracle go stale (>24h).
+    client.emergency_pause();
+    price_oracle.set_timestamp(&0);
+    env.ledger().with_mut(|li| {
+        li.timestamp = 86_401;
+    });
+
+    // Emergency exit must succeed at proportional pricing despite staleness.
+    assert_eq!(client.emergency_withdraw(&admin), 100_000);
+    // 100k transferred in, 100k paid back out → admin is whole again.
+    assert_eq!(tc.balance(&admin), 100_000_000_000_000i128);
+    assert_eq!(tc.balance(&client.address), 0);
+    assert_eq!(client.total_shares(), 0);
+    assert_eq!(client.total_assets(), 0);
+}
+
+#[test]
+fn test_withdraw_still_reverts_when_oracle_stale() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (token, sac, tc) = create_token_contract(&env, &Address::generate(&env));
+    let admin = Address::generate(&env);
+    sac.mint(&admin, &100_000_000_000_000i128);
+
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.init(&admin, &token, &oracle, &treasury, &0u32);
+
+    let price_oracle_id = env.register(MockPriceOracle, ());
+    let price_oracle = MockPriceOracleClient::new(&env, &price_oracle_id);
+    price_oracle.set_price(&20_000_000i128);
+    client.set_share_price_oracle(&admin, &price_oracle_id);
+
+    // Fund the vault so the strict-path withdrawal would otherwise succeed.
+    tc.transfer(&admin, &client.address, &100_000);
+    client.set_total_assets(&100_000);
+    client.set_total_shares(&1_000);
+    client.set_balance(&admin, &1_000);
+
+    // Normal withdrawals keep the strict guard: stale oracle → reverted.
+    price_oracle.set_timestamp(&0);
+    env.ledger().with_mut(|li| {
+        li.timestamp = 86_401;
+    });
+
+    let res = client.try_withdraw(&admin, &500);
+    assert!(res.is_err());
 }

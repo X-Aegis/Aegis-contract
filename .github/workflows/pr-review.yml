@@ -19,15 +19,11 @@ jobs:
     if: (github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)) && github.actor != 'bbkenny' && !contains(github.actor, 'bot')
     runs-on: ubuntu-latest
     env:
+      GH_REPO: ${{ github.repository }}
       GITHUB_TOKEN: ${{ secrets.MAINTAINER_TOKEN != '' && secrets.MAINTAINER_TOKEN || secrets.GITHUB_TOKEN }}
       PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || github.event.issue.number }}
       AUTHOR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.user.login || github.event.comment.user.login }}
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
-
       - name: ❌ Check for Workflow Tampering
         run: |
           AUTHOR_ROLE=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER -q .author_association)
@@ -119,59 +115,3 @@ jobs:
             echo "🕓 Head SHA $HEAD_SHA not reviewed yet. Proceeding with review."
             echo "SKIP_REVIEW=false" >> "$GITHUB_ENV"
           fi
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
-          components: clippy
-
-      - name: Cache Cargo Dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Lint with Clippy
-        id: lint_review
-        continue-on-error: true
-        run: |
-          cd smartcontract
-          cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Run Tests & Build Contracts
-        id: build_review
-        continue-on-error: true
-        run: |
-          cd smartcontract
-          cargo test --all
-          cargo build --target wasm32-unknown-unknown --release
-
-      - name: ❌ Handle Lint Failure
-        if: steps.lint_review.outcome == 'failure'
-        run: |
-          PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
-          gh pr comment $PR_NUMBER --body "Hey @${{ env.AUTHOR }}, the linter (\`cargo clippy\`) flagged some warnings in '$PR_TITLE'. Please run \`cargo clippy --all-targets --all-features -- -D warnings\` locally and fix the issues before pushing again."
-          exit 1
-
-      - name: ❌ Handle Review Failure
-        if: steps.build_review.outcome == 'failure'
-        run: |
-          PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
-          RESPONSES=(
-            "hey @${{ env.AUTHOR }}, took a look at the PR for '$PR_TITLE'. actually, it looks like the CI checks (tests/build) are failing right now. mind checking the logs and fixing the errors? once it's passing, just push an update and we can get it merged."
-            "Thanks for submitting '$PR_TITLE' @${{ env.AUTHOR }}! Unfortunately, the build or tests are failing right now. Please review the Actions logs to see what went wrong and push a fix."
-            "Hey @${{ env.AUTHOR }}! The build/tests are currently failing for '$PR_TITLE'. Could you take a look at the workflow logs and patch up the errors?"
-            "Looks like there are some failing checks on '$PR_TITLE' @${{ env.AUTHOR }}. Once you get the tests passing, let us know by pushing the fixes!"
-            "We're almost there with '$PR_TITLE' @${{ env.AUTHOR }}, but the CI pipeline is red. Check the logs for details and push an update when you have it fixed!"
-            "Hey @${{ env.AUTHOR }}, the tests didn't pass for '$PR_TITLE'. Mind taking a look at the errors and fixing them up?"
-          )
-          SELECTED=$(shuf -n1 -e "${RESPONSES[@]}")
-          gh pr comment $PR_NUMBER --body "$SELECTED"
-          exit 1

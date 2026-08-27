@@ -59,3 +59,42 @@ Emitted when the admin classifies a registered strategy as `Safe` or `Volatile` 
 **Payload:** (Tuple)
 1. `strategy`: Address (The strategy being classified)
 2. `status`: ProtectionStatus (`Safe` or `Volatile`)
+
+---
+
+## VaultPaused
+Emitted after the admin activates the emergency circuit breaker.
+
+**Topics:**
+- `VaultPaused`
+- `admin`: Address
+
+**Payload:**
+- `timestamp`: u64 (Ledger timestamp at which emergency mode was activated)
+
+---
+
+## VaultUnpaused
+Emitted after the admin deactivates the emergency circuit breaker.
+
+**Topics:**
+- `VaultUnpaused`
+- `admin`: Address
+
+**Payload:**
+- `timestamp`: u64 (Ledger timestamp at which normal operation resumed)
+
+---
+
+## EmergencyWithdraw
+Emitted when a user redeems their complete economic position while the vault is paused. The position includes both freely held shares and that user's unprocessed queued-withdrawal shares.
+
+**Topics:**
+- `EmergencyWithdraw`
+- `from`: Address
+
+**Payload:** (Tuple)
+1. `shares_redeemed`: i128 (All economic shares redeemed by the user)
+2. `assets_withdrawn`: i128 (Underlying assets transferred without a withdrawal fee)
+3. `new_total_assets`: i128 (Total managed assets after redemption)
+4. `new_total_shares`: i128 (Total outstanding shares after redemption)

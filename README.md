@@ -1,12 +1,12 @@
-# X-Aegis 🛡️📉
+# XHedge (Aegis) 🛡️📉
 
 ```text
 ╔════════════════════════════════════════════════════════════════════╗
 ║                                                                    ║
-║                         X - A E G I S                              ║
+║                       X H E D G E ( A E G I S )                     ║
 ║                                                                    ║
 ║               AI-Powered Volatility Shield Protocol                ║
-║           Preserving Wealth in Emerging Economies on Stellar       ║
+║          Preserving Wealth in Emerging Economies on Stellar        ║
 ║                                                                    ║
 ╚════════════════════════════════════════════════════════════════════╝
 ```
@@ -27,7 +27,7 @@
 
 Even stablecoins expose users in emerging economies (like Nigeria) to FX timing risk, dollar volatility relative to local inflation, and entry/exit rate manipulation. **Stable ≠ Stable relative to local purchasing power.**
 
-**X-Aegis** acts as a "Micro hedge fund for everyday Africans."
+**XHedge (Aegis)** acts as a "Micro hedge fund for everyday Africans."
 
 -   **User Action:** Users deposit stablecoins.
 -   **AI Engine:** Predicts FX volatility and local inflation trends.
