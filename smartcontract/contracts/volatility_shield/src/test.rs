@@ -1857,6 +1857,61 @@ fn test_multisig_proposal_requires_threshold_approvals() {
 }
 
 #[test]
+fn test_proposal_ids_are_enumerable_in_creation_order() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    let first = client.propose_action(&admin, &ActionType::SetPaused(true));
+    let second = client.propose_action(&admin, &ActionType::SetPaused(false));
+
+    assert_eq!(client.get_proposal_ids(), soroban_sdk::vec![&env, first, second]);
+}
+
+#[test]
+fn test_governance_can_add_strategy() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let strategy = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+
+    client.propose_action(&admin, &ActionType::AddStrategy(strategy.clone()));
+
+    assert!(client.get_strategies().contains(strategy));
+}
+
+#[test]
+fn test_governance_rebalance_rejects_requested_slippage_above_cap() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(VolatilityShield, ());
+    let client = VolatilityShieldClient::new(&env, &contract_id);
+    client.init(&admin, &asset, &oracle, &treasury, &0u32);
+    client.set_max_slippage_bps(&admin, &100u32);
+
+    assert_eq!(
+        client.try_propose_action(&admin, &ActionType::Rebalance(101u32)),
+        Err(Ok(Error::FeeTooHigh))
+    );
+}
+
+#[test]
 fn test_double_approval_rejected() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();

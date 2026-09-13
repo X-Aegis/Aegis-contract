@@ -152,6 +152,8 @@ pub enum DataKey {
     MaxSlippageBps,
     /// Global emergency circuit-breaker state.
     Paused,
+    /// Reentrancy guard for external strategy calls.
+    ReentrancyGuard,
 }
 
 // ─────────────────────────────────────────────
@@ -166,6 +168,10 @@ pub enum ActionType {
     SetPaused(bool),
     /// Change the multisig approval threshold.
     SetThreshold(u32),
+    /// Register a strategy through governance.
+    AddStrategy(Address),
+    /// Execute a rebalance through governance with a requested slippage cap.
+    Rebalance(u32),
 }
 
 /// A pending governance proposal that requires a threshold of guardian
@@ -1052,6 +1058,12 @@ impl VolatilityShield {
             panic!("Unauthorized");
         }
 
+        Self::rebalance_internal(&env);
+    }
+
+    fn rebalance_internal(env: &Env) {
+        Self::require_not_paused(env);
+
         let current_time = env.ledger().timestamp();
         let last_update: u64 = env
             .storage()
@@ -1066,7 +1078,7 @@ impl VolatilityShield {
 
         if current_time > last_update && current_time - last_update > max_staleness {
             env.events().publish(
-                (soroban_sdk::Symbol::new(&env, "Oracle"), soroban_sdk::Symbol::new(&env, "Reject")),
+                (soroban_sdk::Symbol::new(env, "Oracle"), soroban_sdk::Symbol::new(env, "Reject")),
                 last_update,
             );
             panic!("Stale oracle data");
@@ -1078,12 +1090,12 @@ impl VolatilityShield {
             .get(&DataKey::OracleAllocations)
             .expect("No allocations");
 
-        Self::validate_allocations(&env, &allocations);
+        Self::validate_allocations(env, &allocations);
 
-        let asset_addr = Self::get_asset(&env);
-        let token_client = token::Client::new(&env, &asset_addr);
+        let asset_addr = Self::get_asset(env);
+        let token_client = token::Client::new(env, &asset_addr);
         let vault = env.current_contract_address();
-        let total_assets = Self::total_assets(&env);
+        let total_assets = Self::total_assets(env);
 
         let max_slippage_bps: u32 = env
             .storage()
@@ -1093,17 +1105,17 @@ impl VolatilityShield {
 
         // Capture pre-rebalance balances so post-trade deviation can be
         // verified against the slippage tolerance.
-        let mut initial_balances: Map<Address, i128> = Map::new(&env);
+        let mut initial_balances: Map<Address, i128> = Map::new(env);
         for (strategy_addr, _alloc_bps) in allocations.iter() {
             initial_balances.set(
                 strategy_addr.clone(),
-                StrategyClient::new(&env, strategy_addr.clone()).balance(),
+                StrategyClient::new(env, strategy_addr.clone()).balance(),
             );
         }
 
         for (strategy_addr, alloc_bps) in allocations.iter() {
             let target_allocation = (total_assets * alloc_bps) / 10000;
-            let strategy = StrategyClient::new(&env, strategy_addr.clone());
+            let strategy = StrategyClient::new(env, strategy_addr.clone());
             let current_balance = strategy.balance();
 
             if target_allocation > current_balance {
@@ -1122,14 +1134,14 @@ impl VolatilityShield {
         // the configured tolerance of its target allocation, otherwise the
         // whole rebalance is reverted (Soroban transactions are atomic).
         if max_slippage_bps > 0 {
-            Self::verify_rebalance_slippage(&env, &allocations, &initial_balances, total_assets, max_slippage_bps);
+            Self::verify_rebalance_slippage(env, &allocations, &initial_balances, total_assets, max_slippage_bps);
         }
         // -------------------------------
 
-        let final_assets = Self::total_assets(&env);
-        let final_shares = Self::total_shares(&env);
-        env.events().publish((soroban_sdk::Symbol::new(&env, "Rebalance"),), allocations);
-        env.events().publish((soroban_sdk::Symbol::new(&env, "VaultSnapshot"),), (final_assets, final_shares));
+        let final_assets = Self::total_assets(env);
+        let final_shares = Self::total_shares(env);
+        env.events().publish((soroban_sdk::Symbol::new(env, "Rebalance"),), allocations);
+        env.events().publish((soroban_sdk::Symbol::new(env, "VaultSnapshot"),), (final_assets, final_shares));
     }
 
     // ── Strategy Management ───────────────────
@@ -1146,11 +1158,16 @@ impl VolatilityShield {
         let admin = Self::get_admin(&env);
         admin.require_auth();
 
+        Self::add_strategy_internal(&env, &strategy)
+    }
+
+    fn add_strategy_internal(env: &Env, strategy: &Address) -> Result<(), Error> {
+
         let mut strategies: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::Strategies)
-            .unwrap_or(Vec::new(&env));
+            .unwrap_or(Vec::new(env));
         if strategies.contains(strategy.clone()) {
             return Err(Error::AlreadyInitialized);
         }
@@ -1160,7 +1177,7 @@ impl VolatilityShield {
             .set(&DataKey::Strategies, &strategies);
 
         env.events().publish(
-            (soroban_sdk::Symbol::new(&env, "Strategy"), soroban_sdk::Symbol::new(&env, "Added")),
+            (soroban_sdk::Symbol::new(env, "Strategy"), soroban_sdk::Symbol::new(env, "Added")),
             strategy,
         );
 
@@ -2330,6 +2347,14 @@ impl VolatilityShield {
             .get(proposal_id)
     }
 
+    /// Return proposal IDs in creation order so clients can enumerate governance state.
+    pub fn get_proposal_ids(env: Env) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ProposalIds)
+            .unwrap_or(Vec::new(&env))
+    }
+
     /// Set the timelock duration (in seconds) that must elapse before an
     /// approved proposal can execute. Admin-only.
     pub fn set_timelock_duration(env: Env, caller: Address, duration: u64) -> Result<(), Error> {
@@ -2434,6 +2459,15 @@ impl VolatilityShield {
             }
             ActionType::SetThreshold(threshold) => {
                 env.storage().instance().set(&DataKey::Threshold, threshold);
+            }
+            ActionType::AddStrategy(strategy) => {
+                Self::add_strategy_internal(env, strategy)?;
+            }
+            ActionType::Rebalance(requested_slippage_bps) => {
+                if *requested_slippage_bps > Self::get_max_slippage_bps(env.clone()) {
+                    return Err(Error::FeeTooHigh);
+                }
+                Self::rebalance_internal(env);
             }
         }
         env.events().publish(
