@@ -308,6 +308,22 @@ impl VolatilityShield {
     /// stale (24 hours in seconds).
     const SHARE_PRICE_MAX_STALENESS_SECONDS: u64 = 24 * 60 * 60;
 
+    fn enter_guard(env: &Env) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::ReentrancyGuard)
+            .unwrap_or(false)
+        {
+            panic!("ReentrantCall");
+        }
+        env.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+    }
+
+    fn exit_guard(env: &Env) {
+        env.storage().instance().remove(&DataKey::ReentrancyGuard);
+    }
+
     // ── Initialization ────────────────────────
     /// Must be called once. Stores roles and configuration.
     pub fn init(
@@ -1063,6 +1079,7 @@ impl VolatilityShield {
 
     fn rebalance_internal(env: &Env) {
         Self::require_not_paused(env);
+        Self::enter_guard(env);
 
         let current_time = env.ledger().timestamp();
         let last_update: u64 = env
@@ -1142,6 +1159,7 @@ impl VolatilityShield {
         let final_shares = Self::total_shares(env);
         env.events().publish((soroban_sdk::Symbol::new(env, "Rebalance"),), allocations);
         env.events().publish((soroban_sdk::Symbol::new(env, "VaultSnapshot"),), (final_assets, final_shares));
+        Self::exit_guard(env);
     }
 
     // ── Strategy Management ───────────────────
